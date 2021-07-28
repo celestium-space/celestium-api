@@ -37,7 +37,7 @@ async fn main() {
             println!("Failed loading wallet: {}", e);
             match generate_wallet() {
                 Ok(w) => { w }
-                Err(e) => { panic!("Fuck {}", e) }
+                Err(e) => { panic!("Failed generating wallet: {}", e) }
             }
         }
     };
