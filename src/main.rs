@@ -1,6 +1,9 @@
 use std::{
     sync::Arc,
-    convert::Infallible
+    convert::Infallible,
+    env,
+    fs::File,
+    path::Path
 };
 
 // external
@@ -26,6 +29,36 @@ use celestium::{
 
 type SharedWallet = Arc<Mutex<Wallet>>;
 
+
+fn wallet_dir() -> Path {
+    let pathstr: &str =
+        env::var("CELESTIUM_DATA_DIR")
+        .map(|s| s.as_str())
+        .unwrap_or("/data");
+    *Path::new(pathstr)
+}
+
+fn load_wallet() -> Option<Wallet> {
+    // TODO load wallet from disk
+    println!("Attempting to load state from disk.");
+    let dir = wallet_dir();
+
+    // blockchain
+    // let blockchain = 
+
+    // pk
+    // sk
+    // mf_branches
+    // mf_leafs
+    // root_lookup
+    // off_chain_transactions
+    None
+}
+
+fn save_wallet(wallet: Wallet) {
+    // TODO
+}
+
 #[tokio::main]
 async fn main() {
     // TODO: do this properly, from disk
@@ -41,6 +74,7 @@ async fn main() {
         .and_then(ws_handler)
         .with(warp::cors().allow_any_origin());
 
+    // GO! GO! GO!
     println!("Starting server");
     warp::serve(ws_route).run(([0, 0, 0, 0], 8000)).await;
 }
