@@ -1,3 +1,8 @@
+use std::{
+    sync::Arc,
+    convert::Infallible
+};
+
 // external
 use warp::{
     Filter,
@@ -19,11 +24,20 @@ use celestium::{
     wallet::{Wallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK},
 };
 
+type SharedWallet = Arc<Mutex<Wallet>>;
+
 #[tokio::main]
 async fn main() {
+    // TODO: do this properly, from disk
+    // initialize wallet
+    let (pk, sk) = Wallet::generate_ec_keys();
+    let wallet = Wallet::new(pk, sk, true);
+    let shared_wallet = Arc::new(Mutex::new(wallet));
+
     // configure ws route
     let ws_route = warp::path::end()
         .and(warp::ws())
+        .and(with_wallet(shared_wallet.clone()))
         .and_then(ws_handler)
         .with(warp::cors().allow_any_origin());
 
@@ -31,14 +45,19 @@ async fn main() {
     warp::serve(ws_route).run(([0, 0, 0, 0], 8000)).await;
 }
 
-async fn ws_handler(ws: warp::ws::Ws) -> Result<impl Reply, Rejection> {
+fn with_wallet(wallet: SharedWallet) -> impl Filter<Extract = (SharedWallet,), Error = Infallible> + Clone {
+    // warp filters - how do they work?
+    warp::any().map(move || wallet.clone())
+}
+
+async fn ws_handler(ws: warp::ws::Ws, wallet: SharedWallet) -> Result<impl Reply, Rejection> {
     // weird boilerplate because I don't know why
     // this async function seems to just pass stuff on to another async function
     // but I don't know how to inline it 🤷
-    Ok(ws.on_upgrade(move |socket| client_connection(socket)))
+    Ok(ws.on_upgrade(move |socket| client_connection(socket, wallet)))
 }
 
-async fn client_connection(ws: warp::ws::WebSocket) {
+async fn client_connection(ws: warp::ws::WebSocket, wallet: SharedWallet) {
     // keeps a client connection open, pass along incoming messages
     println!("establishing client connection... {:?}", ws);
     let (mut sender, mut receiver) = ws.split();
@@ -50,14 +69,38 @@ async fn client_connection(ws: warp::ws::WebSocket) {
                 break;
             }
         };
-        handle_ws_message(message, &mut sender).await;
+        handle_ws_message(message, &mut sender, wallet.clone()).await;
     }
 }
 
-async fn handle_ws_message(message: Message, sender: &mut SplitSink<WebSocket, Message>) {
+async fn ws_error(errmsg: String, sender: &mut SplitSink<WebSocket, Message>) {
+    println!("{}", errmsg);
+    sender.send(Message::text(errmsg)).await.unwrap();
+}
+
+async fn handle_ws_message(message: Message, sender: &mut SplitSink<WebSocket, Message>, wallet: SharedWallet) {
     // this is the function that actually receives a message
-    // rn it just echoes the message back
-    sender.send(message).await.unwrap();
+    // validate it, add it to the blockchain, then exit.
+
+    if !message.is_binary() {
+        ws_error(format!("Error: expected binary transaction."), sender).await;
+        return;
+    }
+
+    // parse binary transaction
+    let bin_transaction = message.as_bytes();
+    let transaction = match Transaction::from_serialized(&bin_transaction, &mut 0) {
+        Ok(transaction) => { transaction }
+        Err(e) => {
+            ws_error(format!("Error: Could not parse transaction: {}", e), sender).await;
+            return;
+        }
+    };
+
+    // it parses! add transaction to queue
+    if let Err(e) = wallet.lock().await.add_off_chain_transaction(*transaction) {
+        ws_error(format!("Error: Could not add transaction: {}", e), sender).await;
+    }
 }
 
 fn celestium_example() {
