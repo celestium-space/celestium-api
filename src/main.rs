@@ -1,19 +1,20 @@
 use std::{
-    sync::Arc,
-    convert::Infallible
+    io,
+    io::prelude::*,
+    convert::Infallible,
+    env,
+    fs::read,
+    fs::File,
+    path::PathBuf,
+    sync::Arc
 };
 
 // external
-use warp::{
-    Filter,
-    Reply,
-    Rejection,
-    ws::WebSocket,
-    filters::ws::Message
-};
-use tokio::sync::Mutex;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
+use tokio::sync::Mutex;
+use warp::{filters::ws::Message, ws::WebSocket, Filter, Rejection, Reply};
+use cached::proc_macro::cached;
 
 // here
 use celestium::{
@@ -21,7 +22,7 @@ use celestium::{
     block_hash::BlockHash,
     serialize::{DynamicSized, Serialize},
     transaction::Transaction,
-    wallet::{Wallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK},
+    wallet::{Wallet, BinaryWallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK},
 };
 
 type SharedWallet = Arc<Mutex<Wallet>>;
@@ -30,8 +31,17 @@ type SharedWallet = Arc<Mutex<Wallet>>;
 async fn main() {
     // TODO: do this properly, from disk
     // initialize wallet
-    let (pk, sk) = Wallet::generate_ec_keys();
-    let wallet = Wallet::new(pk, sk, true);
+    let wallet = match load_wallet() {
+        Ok(w) => { w }
+        Err(e) => {
+            println!("Failed loading wallet: {}", e);
+            match generate_wallet() {
+                Ok(w) => { w }
+                Err(e) => { panic!("Fuck {}", e) }
+            }
+        }
+    };
+
     let shared_wallet = Arc::new(Mutex::new(wallet));
 
     // configure ws route
@@ -41,11 +51,81 @@ async fn main() {
         .and_then(ws_handler)
         .with(warp::cors().allow_any_origin());
 
+    // GO! GO! GO!
     println!("Starting server");
     warp::serve(ws_route).run(([0, 0, 0, 0], 8000)).await;
 }
 
-fn with_wallet(wallet: SharedWallet) -> impl Filter<Extract = (SharedWallet,), Error = Infallible> + Clone {
+
+/* WALLET PERSISTENCE */
+
+#[cached]
+fn wallet_dir() -> PathBuf {
+    // return path to data on filesystem
+    // memoized because we don't need to make the syscalls errytim
+    let path = PathBuf::from(
+        env::var("CELESTIUM_DATA_DIR")
+            .map(|s| s.to_string())
+            .unwrap_or("/data".to_string())
+    );
+    assert!(path.exists(), "Celestium data path doesn't exist!");
+    assert!(path.is_dir(), "Celestium data path is not a directory!");
+    path
+}
+
+fn load_wallet() -> Result<Wallet, String> {
+    // load wallet from disk. fails if anything is missing
+    println!("Trying to load wallet from disk.");
+    let dir: PathBuf = wallet_dir();
+    let load = |filename: &str| read(dir.join(filename)).map_err(|e| e.to_string());
+    Wallet::from_binary(&BinaryWallet {
+        blockchain_bin:             load("blockchain")?,
+        pk_bin:                     load("pk")?,
+        sk_bin:                     load("sk")?,
+        mf_branches_bin:            load("mf_branches")?,
+        mf_leafs_bin:               load("mf_leafs")?,
+        unspent_outputs_bin:        load("unspent_outputs")?,
+        root_lookup_bin:            load("root_lookup")?,
+        off_chain_transactions_bin: load("off_chain_transactions")?,
+    }, false)
+}
+
+fn save_wallet(wallet: &Wallet) -> Result<(), String> {
+    // write members of the wallet struct to disk
+    // overwrites whatever was in the way
+    println!("Writing wallet to disk.");
+    let dir = wallet_dir();
+    let wallet_bin = wallet.to_binary()?;
+    let save = |filename: &str, data: Vec<u8>|
+        File::create(dir.join(filename))
+        .map(|mut f| f.write_all(&data).map_err(|e| e.to_string()))
+        .map_err(|e| e.to_string());
+    save("blockchain", wallet_bin.blockchain_bin)??;
+    save("pk", wallet_bin.pk_bin)??;
+    save("sk", wallet_bin.sk_bin)??;
+    save("mf_branches_bin", wallet_bin.mf_branches_bin)??;
+    save("mf_leafs_bin", wallet_bin.mf_leafs_bin)??;
+    save("mf_unspent_outputs_bin", wallet_bin.unspent_outputs_bin)??;
+    save("root_lookup_bin", wallet_bin.root_lookup_bin)??;
+    save("off_chain_transactions_bin", wallet_bin.off_chain_transactions_bin)??;
+    Ok(())
+}
+
+fn generate_wallet() -> Result<Wallet, String> {
+    // make new wallet, write it to disk
+    println!("Generating new wallet.");
+    let (pk, sk) = Wallet::generate_ec_keys();
+    let wallet = Wallet::new(pk, sk, true);
+    save_wallet(&wallet)?;
+    Ok(wallet)
+}
+
+
+/* WARP STUFF */
+
+fn with_wallet(
+    wallet: SharedWallet,
+) -> impl Filter<Extract = (SharedWallet,), Error = Infallible> + Clone {
     // warp filters - how do they work?
     warp::any().map(move || wallet.clone())
 }
@@ -78,7 +158,11 @@ async fn ws_error(errmsg: String, sender: &mut SplitSink<WebSocket, Message>) {
     sender.send(Message::text(errmsg)).await.unwrap();
 }
 
-async fn handle_ws_message(message: Message, sender: &mut SplitSink<WebSocket, Message>, wallet: SharedWallet) {
+async fn handle_ws_message(
+    message: Message,
+    sender: &mut SplitSink<WebSocket, Message>,
+    wallet: SharedWallet,
+) {
     // this is the function that actually receives a message
     // validate it, add it to the blockchain, then exit.
 
@@ -90,17 +174,31 @@ async fn handle_ws_message(message: Message, sender: &mut SplitSink<WebSocket, M
     // parse binary transaction
     let bin_transaction = message.as_bytes();
     let transaction = match Transaction::from_serialized(&bin_transaction, &mut 0) {
-        Ok(transaction) => { transaction }
+        Ok(transaction) => transaction,
         Err(e) => {
             ws_error(format!("Error: Could not parse transaction: {}", e), sender).await;
             return;
         }
     };
 
-    // it parses! add transaction to queue
-    if let Err(e) = wallet.lock().await.add_off_chain_transaction(*transaction) {
-        ws_error(format!("Error: Could not add transaction: {}", e), sender).await;
-    }
+    {   // transaction parses! get the shared wallet.
+        let mut real_wallet = wallet.lock().await;
+
+        // add transaction to queue
+        if let Err(e) = real_wallet.add_off_chain_transaction(*transaction) {
+            ws_error(format!("Error: Could not add transaction: {}", e), sender).await;
+        }
+
+        // store new wallet
+        if let Err(e) = save_wallet(&real_wallet) {
+            ws_error(
+                format!("Error: valid transaction couldn't be stored: {}", e),
+                sender
+            ).await;
+        }
+
+        drop(real_wallet)
+    }   // mutex lock released
 }
 
 fn celestium_example() {
