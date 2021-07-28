@@ -1,22 +1,10 @@
-use std::{
-    sync::Arc,
-    convert::Infallible,
-    env,
-    fs::File,
-    path::Path
-};
+use std::{convert::Infallible, env, fs::File, path::Path, sync::Arc};
 
 // external
-use warp::{
-    Filter,
-    Reply,
-    Rejection,
-    ws::WebSocket,
-    filters::ws::Message
-};
-use tokio::sync::Mutex;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
+use tokio::sync::Mutex;
+use warp::{filters::ws::Message, ws::WebSocket, Filter, Rejection, Reply};
 
 // here
 use celestium::{
@@ -29,13 +17,11 @@ use celestium::{
 
 type SharedWallet = Arc<Mutex<Wallet>>;
 
-
-fn wallet_dir() -> Path {
-    let pathstr: &str =
-        env::var("CELESTIUM_DATA_DIR")
-        .map(|s| s.as_str())
-        .unwrap_or("/data");
-    *Path::new(pathstr)
+// Path::new(wallet_dir()) - der hvor du skal bruge den
+fn wallet_dir() -> String {
+    env::var("CELESTIUM_DATA_DIR")
+        .map(|s| s.to_string())
+        .unwrap_or("/data".to_string())
 }
 
 fn load_wallet() -> Option<Wallet> {
@@ -44,7 +30,7 @@ fn load_wallet() -> Option<Wallet> {
     let dir = wallet_dir();
 
     // blockchain
-    // let blockchain = 
+    // let blockchain =
 
     // pk
     // sk
@@ -79,7 +65,9 @@ async fn main() {
     warp::serve(ws_route).run(([0, 0, 0, 0], 8000)).await;
 }
 
-fn with_wallet(wallet: SharedWallet) -> impl Filter<Extract = (SharedWallet,), Error = Infallible> + Clone {
+fn with_wallet(
+    wallet: SharedWallet,
+) -> impl Filter<Extract = (SharedWallet,), Error = Infallible> + Clone {
     // warp filters - how do they work?
     warp::any().map(move || wallet.clone())
 }
@@ -112,7 +100,11 @@ async fn ws_error(errmsg: String, sender: &mut SplitSink<WebSocket, Message>) {
     sender.send(Message::text(errmsg)).await.unwrap();
 }
 
-async fn handle_ws_message(message: Message, sender: &mut SplitSink<WebSocket, Message>, wallet: SharedWallet) {
+async fn handle_ws_message(
+    message: Message,
+    sender: &mut SplitSink<WebSocket, Message>,
+    wallet: SharedWallet,
+) {
     // this is the function that actually receives a message
     // validate it, add it to the blockchain, then exit.
 
@@ -124,7 +116,7 @@ async fn handle_ws_message(message: Message, sender: &mut SplitSink<WebSocket, M
     // parse binary transaction
     let bin_transaction = message.as_bytes();
     let transaction = match Transaction::from_serialized(&bin_transaction, &mut 0) {
-        Ok(transaction) => { transaction }
+        Ok(transaction) => transaction,
         Err(e) => {
             ws_error(format!("Error: Could not parse transaction: {}", e), sender).await;
             return;
