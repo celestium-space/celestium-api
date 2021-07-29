@@ -1,5 +1,4 @@
 use std::{
-    io,
     io::prelude::*,
     convert::Infallible,
     env,
@@ -18,18 +17,18 @@ use cached::proc_macro::cached;
 
 // here
 use celestium::{
-    block::Block,
-    block_hash::BlockHash,
-    serialize::{DynamicSized, Serialize},
+    serialize::{Serialize},
     transaction::Transaction,
-    wallet::{Wallet, BinaryWallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK},
+    wallet::{
+        Wallet,
+        BinaryWallet,
+    },
 };
 
 type SharedWallet = Arc<Mutex<Wallet>>;
 
 #[tokio::main]
 async fn main() {
-    // TODO: do this properly, from disk
     // initialize wallet
     let wallet = match load_wallet() {
         Ok(w) => { w }
@@ -114,8 +113,7 @@ fn save_wallet(wallet: &Wallet) -> Result<(), String> {
 fn generate_wallet() -> Result<Wallet, String> {
     // make new wallet, write it to disk
     println!("Generating new wallet.");
-    let (pk, sk) = Wallet::generate_ec_keys();
-    let wallet = Wallet::new(pk, sk, true);
+    let wallet = Wallet::generate_init_blockchain(false)?;
     save_wallet(&wallet)?;
     Ok(wallet)
 }
@@ -199,19 +197,4 @@ async fn handle_ws_message(
 
         drop(real_wallet)
     }   // mutex lock released
-}
-
-fn celestium_example() {
-    // don't need this ad verbatim - just for reference
-    let (pk, sk) = Wallet::generate_ec_keys();
-    let mut wallet = Wallet::new(pk, sk, true);
-    let bin_transaction = vec![0u8; 32]; // Got from Webesocket
-    match Transaction::from_serialized(&bin_transaction, &mut 0) {
-        Ok(transaction) => {
-            if let Err(e) = wallet.add_off_chain_transaction(*transaction) {
-                println!("Could not add transaction: {}", e);
-            }
-        }
-        Err(e) => println!("Could not parse transaction: {}", e),
-    }
 }
