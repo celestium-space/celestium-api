@@ -27,7 +27,7 @@ use celestium::{
 
 mod canvas;
 
-type SharedWallet = Arc<Mutex<Wallet>>;
+type SharedWallet = Arc<Mutex<Box<Wallet>>>;
 type SharedCanvas = Arc<Mutex<canvas::Canvas>>;
 
 #[tokio::main]
@@ -43,11 +43,13 @@ async fn main() {
             }
         }
     };
-    let shared_wallet = Arc::new(Mutex::new(wallet));
+    let shared_wallet = Arc::new(Mutex::new(Box::new(wallet)));
 
     // initialize empty canvas
+    println!("Initializing canvas...");
     let canvas = canvas::empty_canvas();
     let shared_canvas = Arc::new(Mutex::new(canvas));
+    println!("Canvas initialized.");
 
     // configure ws route
     let ws_route = warp::path::end()
@@ -109,16 +111,18 @@ fn save_wallet(wallet: &Wallet) -> Result<(), String> {
     save("blockchain", wallet_bin.blockchain_bin)??;
     save("pk", wallet_bin.pk_bin)??;
     save("sk", wallet_bin.sk_bin)??;
-    save("mf_branches_bin", wallet_bin.mf_branches_bin)??;
-    save("mf_leafs_bin", wallet_bin.mf_leafs_bin)??;
-    save("mf_unspent_outputs_bin", wallet_bin.unspent_outputs_bin)??;
-    save("root_lookup_bin", wallet_bin.root_lookup_bin)??;
-    save("off_chain_transactions_bin", wallet_bin.off_chain_transactions_bin)??;
+    save("mf_branches", wallet_bin.mf_branches_bin)??;
+    save("mf_leafs", wallet_bin.mf_leafs_bin)??;
+    save("unspent_outputs", wallet_bin.unspent_outputs_bin)??;
+    save("root_lookup", wallet_bin.root_lookup_bin)??;
+    save("off_chain_transactions", wallet_bin.off_chain_transactions_bin)??;
+    println!("Wrote wallet to disk.");
     Ok(())
 }
 
 fn generate_wallet() -> Result<Wallet, String> {
     // make new wallet, write it to disk
+    // TODO: this should probably panic if there's a partial wallet in the way
     println!("Generating new wallet.");
     let wallet = Wallet::generate_init_blockchain(false)?;
     save_wallet(&wallet)?;
