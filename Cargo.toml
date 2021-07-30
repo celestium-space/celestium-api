@@ -16,3 +16,6 @@ cached = "0.23.0"
 [dependencies.celestium]
 path = "../celestium-lib"
 version = "0.1.0"
+
+[features]
+mining-ez-mode = ["celestium/mining-ez-mode"]
