@@ -226,13 +226,11 @@ async fn handle_ws_message(
     };
 
     { // pixel parses! lock and add to canvas
-        // TODO: possible error? why doesn't this need to be mutable?
-        let real_canvas = canvas.lock().await;
-        if let Err(e) = canvas::set_pixel(*real_canvas, x, y, pixel) {
+        let mut real_canvas = canvas.lock().await;
+        if let Err(e) = canvas::set_pixel(&mut real_canvas, x, y, pixel) {
             ws_error!(s, format!("Error: {}", e));
         }
         drop(real_canvas);
     } // shared canvas released
-
     // TODO inform all the other ws clients about the new pixel
 }
