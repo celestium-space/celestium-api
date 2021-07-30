@@ -163,7 +163,7 @@ async fn client_connection(ws: warp::ws::WebSocket, wallet: SharedWallet, canvas
     // keeps a client connection open, pass along incoming messages
     println!("establishing client connection... {:?}", ws);
     let (mut sender, mut receiver) = ws.split();
-    
+
     {   // get current canvas, send it to the new client
         let real_canvas = canvas.lock().await;
         let initial_pic = canvas::serialize_colors(&real_canvas);
