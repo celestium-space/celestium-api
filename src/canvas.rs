@@ -11,12 +11,18 @@ pub type Pixel = ([u8; 32], Color);
 pub type Canvas = Box<[[Pixel; HEIGHT as usize]; WIDTH as usize]>;
 
 
-pub fn init_canvas() -> Canvas {
+pub fn empty_canvas() -> Canvas {
     // TODO: is this the rust-y way to do this?
     //       I feel like `Canvas::new()` might be more idiomatic
-    //       but I don't really know how to do that
-    //       ¯\_(ツ)_/¯
+    //       but I don't really know how to do that ¯\_(ツ)_/¯
     Box::new([[EMPTY_PIXEL; HEIGHT as usize]; WIDTH as usize])
+}
+
+pub fn serialize_colors(canvas: &Canvas) -> Vec<u8> {
+    // serialize entire canvas into only colors
+    canvas.iter().map(
+        |column| column.iter().map( |(_, c)| *c)
+    ).flatten().collect()
 }
 
 pub fn get_pixel(canvas: Canvas, x: u16, y: u16) -> Pixel {
