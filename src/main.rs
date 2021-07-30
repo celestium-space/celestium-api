@@ -46,7 +46,7 @@ async fn main() {
     let shared_wallet = Arc::new(Mutex::new(wallet));
 
     // initialize empty canvas
-    let canvas = canvas::init_canvas();
+    let canvas = canvas::empty_canvas();
     let shared_canvas = Arc::new(Mutex::new(canvas));
 
     // configure ws route
@@ -149,10 +149,31 @@ async fn ws_handler(ws: warp::ws::Ws, wallet: SharedWallet, canvas: SharedCanvas
     Ok(ws.on_upgrade(move |socket| client_connection(socket, wallet, canvas)))
 }
 
+macro_rules! ws_error {
+    // print the error, send it out over websockets
+    // and exit function early
+    ($sender: expr, $errmsg: expr) => {
+        println!("{}", $errmsg);
+        $sender.send(Message::text($errmsg)).await.unwrap();
+        return;
+    }
+}
+
 async fn client_connection(ws: warp::ws::WebSocket, wallet: SharedWallet, canvas: SharedCanvas) {
     // keeps a client connection open, pass along incoming messages
     println!("establishing client connection... {:?}", ws);
     let (mut sender, mut receiver) = ws.split();
+    
+    {   // get current canvas, send it to the new client
+        let real_canvas = canvas.lock().await;
+        let initial_pic = canvas::serialize_colors(&real_canvas);
+        drop(real_canvas);
+        // canvas released
+        if let Err(e) = sender.send(Message::binary(initial_pic)).await {
+            ws_error!(sender, format!("Error sending canvas: {}", e));
+        }
+    }
+
     while let Some(body) = receiver.next().await {
         let message = match body {
             Ok(msg) => msg,
@@ -162,17 +183,6 @@ async fn client_connection(ws: warp::ws::WebSocket, wallet: SharedWallet, canvas
             }
         };
         handle_ws_message(message, &mut sender, wallet.clone(), canvas.clone()).await;
-    }
-}
-
-macro_rules! ws_error {
-    // print the error,
-    // send it out over websockets,
-    // and exit function early
-    ($sender: expr, $errmsg: expr) => {
-        println!("{}", $errmsg);
-        $sender.send(Message::text($errmsg)).await.unwrap();
-        return;
     }
 }
 
@@ -212,25 +222,27 @@ async fn handle_ws_message(
         drop(real_wallet)
     }   // wallet released
 
-    // extract and parse pixel data
-    let base_message = match transaction.get_base_transaction_message() {
-        Ok(bm) => { bm }
-        Err(e) => { ws_error!(s, format!("Error: {}", e)); }
-    };
-    let mut pixeldata = [0u8; 37];
-    pixeldata.copy_from_slice(&base_message[0..38]);
-    let (x, y, pixel): (u16, u16, canvas::Pixel) =
-        match canvas::parse_pixel(pixeldata) {
-            Ok(xyp) => { xyp }
-            Err(e) => { ws_error!(s, format!("Error: {}", e)); }
-    };
-
-    { // pixel parses! lock and add to canvas
+    // if the transaction has a base message, it's likely a pixel NFT
+    // XXX: this will change later, when we add voting NFTs
+    if let Ok(base_transaction_message) = transaction.get_base_transaction_message() {
+         // get canvas and add the new transaction
         let mut real_canvas = canvas.lock().await;
-        if let Err(e) = canvas::set_pixel(&mut real_canvas, x, y, pixel) {
+        if let Err(e) = transaction_to_canvas(&mut real_canvas, base_transaction_message) {
             ws_error!(s, format!("Error: {}", e));
         }
         drop(real_canvas);
     } // shared canvas released
+
     // TODO inform all the other ws clients about the new pixel
+}
+
+fn transaction_to_canvas(canvas: &mut canvas::Canvas, base_transaction_message: [u8; 64]) -> Result<(u16, u16, canvas::Pixel), String> {
+    // extract and parse pixel data
+    let mut pixeldata = [0u8; 37];
+    pixeldata.copy_from_slice(&base_transaction_message[0..38]);
+    let (x, y, pixel): (u16, u16, canvas::Pixel) = canvas::parse_pixel(pixeldata)?;
+
+    // add it to the canvas
+    canvas::set_pixel(canvas, x, y, pixel)?;
+    Ok((x, y, pixel))
 }
