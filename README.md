@@ -23,7 +23,9 @@ Here's what they are:
 **From API server to client:**
 
 update pixel: `<type:u8><x:u16><y:u16><color:u8>`
+
 entire image: `<type:u8><image:[u8; 1_000_000]>`
+
 error: `<type:u8><msg:str>`
 
 **From client to API server:**
