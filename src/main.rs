@@ -25,7 +25,10 @@ use celestium::{
     },
 };
 
+mod canvas;
+
 type SharedWallet = Arc<Mutex<Wallet>>;
+type SharedCanvas = Arc<Mutex<canvas::Canvas>>;
 
 #[tokio::main]
 async fn main() {
@@ -40,13 +43,17 @@ async fn main() {
             }
         }
     };
-
     let shared_wallet = Arc::new(Mutex::new(wallet));
+
+    // initialize empty canvas
+    let canvas = canvas::init_canvas();
+    let shared_canvas = Arc::new(Mutex::new(canvas));
 
     // configure ws route
     let ws_route = warp::path::end()
         .and(warp::ws())
         .and(with_wallet(shared_wallet.clone()))
+        .and(with_canvas(shared_canvas.clone()))
         .and_then(ws_handler)
         .with(warp::cors().allow_any_origin());
 
@@ -128,14 +135,21 @@ fn with_wallet(
     warp::any().map(move || wallet.clone())
 }
 
-async fn ws_handler(ws: warp::ws::Ws, wallet: SharedWallet) -> Result<impl Reply, Rejection> {
+fn with_canvas(
+    canvas: SharedCanvas,
+) -> impl Filter<Extract = (SharedCanvas,), Error = Infallible> + Clone {
+    // warp filters - how do they work?
+    warp::any().map(move || canvas.clone())
+}
+
+async fn ws_handler(ws: warp::ws::Ws, wallet: SharedWallet, canvas: SharedCanvas) -> Result<impl Reply, Rejection> {
     // weird boilerplate because I don't know why
     // this async function seems to just pass stuff on to another async function
     // but I don't know how to inline it 🤷
-    Ok(ws.on_upgrade(move |socket| client_connection(socket, wallet)))
+    Ok(ws.on_upgrade(move |socket| client_connection(socket, wallet, canvas)))
 }
 
-async fn client_connection(ws: warp::ws::WebSocket, wallet: SharedWallet) {
+async fn client_connection(ws: warp::ws::WebSocket, wallet: SharedWallet, canvas: SharedCanvas) {
     // keeps a client connection open, pass along incoming messages
     println!("establishing client connection... {:?}", ws);
     let (mut sender, mut receiver) = ws.split();
@@ -147,7 +161,7 @@ async fn client_connection(ws: warp::ws::WebSocket, wallet: SharedWallet) {
                 break;
             }
         };
-        handle_ws_message(message, &mut sender, wallet.clone()).await;
+        handle_ws_message(message, &mut sender, wallet.clone(), canvas.clone()).await;
     }
 }
 
@@ -160,6 +174,7 @@ async fn handle_ws_message(
     message: Message,
     sender: &mut SplitSink<WebSocket, Message>,
     wallet: SharedWallet,
+    canvas: SharedCanvas
 ) {
     // this is the function that actually receives a message
     // validate it, add it to the blockchain, then exit.
@@ -179,11 +194,11 @@ async fn handle_ws_message(
         }
     };
 
-    {   // transaction parses! get the shared wallet.
+    {   // transaction parses! get the wallet.
         let mut real_wallet = wallet.lock().await;
 
         // add transaction to queue
-        if let Err(e) = real_wallet.add_off_chain_transaction(*transaction) {
+        if let Err(e) = real_wallet.add_off_chain_transaction(*transaction.clone()) {
             ws_error(format!("Error: Could not add transaction: {}", e), sender).await;
         }
 
@@ -196,5 +211,16 @@ async fn handle_ws_message(
         }
 
         drop(real_wallet)
-    }   // mutex lock released
+    }   // wallet released
+
+    // check if transaction contains a pixel
+    if transaction.inputs.len() != 1 && transaction.outputs.len() != 1 {
+        ws_error("Error: pixel transactions should have 1 input and 1 output".to_string(), sender).await;
+    }
+
+    // let pixeldata: [u8; 37] = transaction.inputs[0].binary_message;
 }
+
+
+// transaction input: <prevhash><x><y><c>
+// transaction output: <hash of that ^>
