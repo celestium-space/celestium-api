@@ -165,14 +165,20 @@ async fn client_connection(ws: warp::ws::WebSocket, wallet: SharedWallet, canvas
     }
 }
 
-async fn ws_error(errmsg: String, sender: &mut SplitSink<WebSocket, Message>) {
-    println!("{}", errmsg);
-    sender.send(Message::text(errmsg)).await.unwrap();
+macro_rules! ws_error {
+    // print the error,
+    // send it out over websockets,
+    // and exit function early
+    ($sender: expr, $errmsg: expr) => {
+        println!("{}", $errmsg);
+        $sender.send(Message::text($errmsg)).await.unwrap();
+        return;
+    }
 }
 
 async fn handle_ws_message(
     message: Message,
-    sender: &mut SplitSink<WebSocket, Message>,
+    s: &mut SplitSink<WebSocket, Message>,
     wallet: SharedWallet,
     canvas: SharedCanvas
 ) {
@@ -180,18 +186,14 @@ async fn handle_ws_message(
     // validate it, add it to the blockchain, then exit.
 
     if !message.is_binary() {
-        ws_error(format!("Error: expected binary transaction."), sender).await;
-        return;
+        ws_error!(s, format!("Error: expected binary transaction."));
     }
 
     // parse binary transaction
     let bin_transaction = message.as_bytes();
     let transaction = match Transaction::from_serialized(&bin_transaction, &mut 0) {
         Ok(transaction) => transaction,
-        Err(e) => {
-            ws_error(format!("Error: Could not parse transaction: {}", e), sender).await;
-            return;
-        }
+        Err(e) => { ws_error!(s, format!("Error: Could not parse transaction: {}", e)); }
     };
 
     {   // transaction parses! get the wallet.
@@ -199,42 +201,38 @@ async fn handle_ws_message(
 
         // add transaction to queue
         if let Err(e) = real_wallet.add_off_chain_transaction(*transaction.clone()) {
-            ws_error(format!("Error: Could not add transaction: {}", e), sender).await;
+            ws_error!(s, format!("Error: Could not add transaction: {}", e));
         }
 
         // store new wallet
         if let Err(e) = save_wallet(&real_wallet) {
-            ws_error(
-                format!("Error: valid transaction couldn't be stored: {}", e),
-                sender
-            ).await;
+            ws_error!(s, format!("Error: valid transaction couldn't be stored: {}", e));
         }
 
         drop(real_wallet)
     }   // wallet released
 
-    // check if transaction contains a pixel
-    // TODO: what do when these are not pub
-    if transaction.inputs.len() == 0 && transaction.outputs.len() != 1 {
-        ws_error("Error: pixel transactions should have 0 inputs and 1 output".to_string(), sender).await;
-    }
-
-    // TODO get from real transaction
-    let pixeldata: [u8; 37] = transaction.get_base_transaction_message();
-    let pixeldata: [u8; 37] = [0; 37];
-
+    // extract and parse pixel data
+    let base_message = match transaction.get_base_transaction_message() {
+        Ok(bm) => { bm }
+        Err(e) => { ws_error!(s, format!("Error: {}", e)); }
+    };
+    let mut pixeldata = [0u8; 37];
+    pixeldata.copy_from_slice(&base_message[0..38]);
     let (x, y, pixel): (u16, u16, canvas::Pixel) =
         match canvas::parse_pixel(pixeldata) {
             Ok(xyp) => { xyp }
-            Err(e) => {
-                ws_error(format!("Error: {}", e), sender);
-                return;
-            }
+            Err(e) => { ws_error!(s, format!("Error: {}", e)); }
     };
 
+    { // pixel parses! lock and add to canvas
+        // TODO: possible error? why doesn't this need to be mutable?
+        let real_canvas = canvas.lock().await;
+        if let Err(e) = canvas::set_pixel(*real_canvas, x, y, pixel) {
+            ws_error!(s, format!("Error: {}", e));
+        }
+        drop(real_canvas);
+    } // shared canvas released
 
-
+    // TODO inform all the other ws clients about the new pixel
 }
-
-// transaction input: <prevhash><x><y><c>
-// transaction output: <hash of that ^>
