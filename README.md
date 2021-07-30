@@ -22,11 +22,11 @@ Here's what they are:
 
 **From API server to client:**
 
-update pixel: `<type:u8><x:u16><y:u16><color:u8>`
+update pixel: `0x00<x:u16><y:u16><color:u8>`
 
-entire image: `<type:u8><image:[u8; 1_000_000]>`
+entire image: `0x01<image:[u8; 1_000_000]>`
 
-error: `<type:u8><msg:str>`
+error: `0x02<msg:str>`
 
 **From client to API server:**
 
