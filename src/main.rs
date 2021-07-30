@@ -214,13 +214,27 @@ async fn handle_ws_message(
     }   // wallet released
 
     // check if transaction contains a pixel
-    if transaction.inputs.len() != 1 && transaction.outputs.len() != 1 {
-        ws_error("Error: pixel transactions should have 1 input and 1 output".to_string(), sender).await;
+    // TODO: what do when these are not pub
+    if transaction.inputs.len() == 0 && transaction.outputs.len() != 1 {
+        ws_error("Error: pixel transactions should have 0 inputs and 1 output".to_string(), sender).await;
     }
 
-    // let pixeldata: [u8; 37] = transaction.inputs[0].binary_message;
-}
+    // TODO get from real transaction
+    let pixeldata: [u8; 37] = transaction.get_base_transaction_message();
+    let pixeldata: [u8; 37] = [0; 37];
 
+    let (x, y, pixel): (u16, u16, canvas::Pixel) =
+        match canvas::parse_pixel(pixeldata) {
+            Ok(xyp) => { xyp }
+            Err(e) => {
+                ws_error(format!("Error: {}", e), sender);
+                return;
+            }
+    };
+
+
+
+}
 
 // transaction input: <prevhash><x><y><c>
 // transaction output: <hash of that ^>
