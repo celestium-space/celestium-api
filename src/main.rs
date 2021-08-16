@@ -1,28 +1,17 @@
-use std::{
-    io,
-    io::prelude::*,
-    convert::Infallible,
-    env,
-    fs::read,
-    fs::File,
-    path::PathBuf,
-    sync::Arc
-};
+use std::{convert::Infallible, env, fs::read, fs::File, io::prelude::*, path::PathBuf, sync::Arc};
 
 // external
+use cached::proc_macro::cached;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::Mutex;
 use warp::{filters::ws::Message, ws::WebSocket, Filter, Rejection, Reply};
-use cached::proc_macro::cached;
 
 // here
 use celestium::{
-    block::Block,
-    block_hash::BlockHash,
-    serialize::{DynamicSized, Serialize},
+    serialize::Serialize,
     transaction::Transaction,
-    wallet::{Wallet, BinaryWallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK},
+    wallet::{BinaryWallet, Wallet},
 };
 
 type SharedWallet = Arc<Mutex<Wallet>>;
@@ -32,12 +21,14 @@ async fn main() {
     // TODO: do this properly, from disk
     // initialize wallet
     let wallet = match load_wallet() {
-        Ok(w) => { w }
+        Ok(w) => w,
         Err(e) => {
             println!("Failed loading wallet: {}", e);
             match generate_wallet() {
-                Ok(w) => { w }
-                Err(e) => { panic!("Fuck {}", e) }
+                Ok(w) => w,
+                Err(e) => {
+                    panic!("Fuck {}", e)
+                }
             }
         }
     };
@@ -56,18 +47,14 @@ async fn main() {
     warp::serve(ws_route).run(([0, 0, 0, 0], 8000)).await;
 }
 
-
 /* WALLET PERSISTENCE */
 
 #[cached]
 fn wallet_dir() -> PathBuf {
     // return path to data on filesystem
     // memoized because we don't need to make the syscalls errytim
-    let path = PathBuf::from(
-        env::var("CELESTIUM_DATA_DIR")
-            .map(|s| s.to_string())
-            .unwrap_or("/data".to_string())
-    );
+    let path =
+        PathBuf::from(env::var("CELESTIUM_DATA_DIR").unwrap_or_else(|_| "/data".to_string()));
     assert!(path.exists(), "Celestium data path doesn't exist!");
     assert!(path.is_dir(), "Celestium data path is not a directory!");
     path
@@ -78,16 +65,19 @@ fn load_wallet() -> Result<Wallet, String> {
     println!("Trying to load wallet from disk.");
     let dir: PathBuf = wallet_dir();
     let load = |filename: &str| read(dir.join(filename)).map_err(|e| e.to_string());
-    Wallet::from_binary(&BinaryWallet {
-        blockchain_bin:             load("blockchain")?,
-        pk_bin:                     load("pk")?,
-        sk_bin:                     load("sk")?,
-        mf_branches_bin:            load("mf_branches")?,
-        mf_leafs_bin:               load("mf_leafs")?,
-        unspent_outputs_bin:        load("unspent_outputs")?,
-        root_lookup_bin:            load("root_lookup")?,
-        off_chain_transactions_bin: load("off_chain_transactions")?,
-    }, false)
+    Wallet::from_binary(
+        &BinaryWallet {
+            blockchain_bin: load("blockchain")?,
+            pk_bin: load("pk")?,
+            sk_bin: load("sk")?,
+            mf_branches_bin: load("mf_branches")?,
+            mf_leafs_bin: load("mf_leafs")?,
+            unspent_outputs_bin: load("unspent_outputs")?,
+            root_lookup_bin: load("root_lookup")?,
+            off_chain_transactions_bin: load("off_chain_transactions")?,
+        },
+        false,
+    )
 }
 
 fn save_wallet(wallet: &Wallet) -> Result<(), String> {
@@ -96,10 +86,11 @@ fn save_wallet(wallet: &Wallet) -> Result<(), String> {
     println!("Writing wallet to disk.");
     let dir = wallet_dir();
     let wallet_bin = wallet.to_binary()?;
-    let save = |filename: &str, data: Vec<u8>|
+    let save = |filename: &str, data: Vec<u8>| {
         File::create(dir.join(filename))
-        .map(|mut f| f.write_all(&data).map_err(|e| e.to_string()))
-        .map_err(|e| e.to_string());
+            .map(|mut f| f.write_all(&data).map_err(|e| e.to_string()))
+            .map_err(|e| e.to_string())
+    };
     save("blockchain", wallet_bin.blockchain_bin)??;
     save("pk", wallet_bin.pk_bin)??;
     save("sk", wallet_bin.sk_bin)??;
@@ -107,7 +98,10 @@ fn save_wallet(wallet: &Wallet) -> Result<(), String> {
     save("mf_leafs_bin", wallet_bin.mf_leafs_bin)??;
     save("mf_unspent_outputs_bin", wallet_bin.unspent_outputs_bin)??;
     save("root_lookup_bin", wallet_bin.root_lookup_bin)??;
-    save("off_chain_transactions_bin", wallet_bin.off_chain_transactions_bin)??;
+    save(
+        "off_chain_transactions_bin",
+        wallet_bin.off_chain_transactions_bin,
+    )??;
     Ok(())
 }
 
@@ -115,11 +109,10 @@ fn generate_wallet() -> Result<Wallet, String> {
     // make new wallet, write it to disk
     println!("Generating new wallet.");
     let (pk, sk) = Wallet::generate_ec_keys();
-    let wallet = Wallet::new(pk, sk, true);
+    let wallet = Wallet::new(pk, sk, true)?;
     save_wallet(&wallet)?;
     Ok(wallet)
 }
-
 
 /* WARP STUFF */
 
@@ -167,7 +160,7 @@ async fn handle_ws_message(
     // validate it, add it to the blockchain, then exit.
 
     if !message.is_binary() {
-        ws_error(format!("Error: expected binary transaction."), sender).await;
+        ws_error("Error: expected binary transaction.".to_string(), sender).await;
         return;
     }
 
@@ -181,7 +174,8 @@ async fn handle_ws_message(
         }
     };
 
-    {   // transaction parses! get the shared wallet.
+    {
+        // transaction parses! get the shared wallet.
         let mut real_wallet = wallet.lock().await;
 
         // add transaction to queue
@@ -193,18 +187,19 @@ async fn handle_ws_message(
         if let Err(e) = save_wallet(&real_wallet) {
             ws_error(
                 format!("Error: valid transaction couldn't be stored: {}", e),
-                sender
-            ).await;
+                sender,
+            )
+            .await;
         }
 
         drop(real_wallet)
-    }   // mutex lock released
+    } // mutex lock released
 }
 
 fn celestium_example() {
     // don't need this ad verbatim - just for reference
     let (pk, sk) = Wallet::generate_ec_keys();
-    let mut wallet = Wallet::new(pk, sk, true);
+    let mut wallet = Wallet::new(pk, sk, true).unwrap();
     let bin_transaction = vec![0u8; 32]; // Got from Webesocket
     match Transaction::from_serialized(&bin_transaction, &mut 0) {
         Ok(transaction) => {
