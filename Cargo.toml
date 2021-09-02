@@ -12,6 +12,9 @@ tokio-stream = "0.1.6"
 warp = "0.3.1"
 futures = { version = "0.3", default-features=false }
 cached = "0.23.0"
+rand = "0.8.4"
+num-traits = "0.2"
+num-derive = "0.2"
 
 [dependencies.celestium]
 path = "../celestium-lib"

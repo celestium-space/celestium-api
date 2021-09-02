@@ -1,60 +1,100 @@
 /* Maniuplating a 1000x1000 pixel canvas */
-use std::convert::TryInto;
+use rand::Rng;
 
 const NUM_COLORS: u8 = 16;
-const WIDTH: u16 = 1000;
-const HEIGHT: u16 = 1000;
-const EMPTY_PIXEL: Pixel = ([0u8; 32], 0u8);
+const WIDTH: usize = 1000;
+const HEIGHT: usize = 1000;
 
 pub type Color = u8;
-pub type Pixel = ([u8; 32], Color);
-pub type Canvas = Vec<Vec<Pixel>>;
 
-pub fn empty_canvas() -> Canvas {
-    // TODO: is this the rust-y way to do this?
-    //       I feel like `Canvas::new()` might be more idiomatic
-    //       but I don't really know how to do that ¯\_(ツ)_/¯
-    vec![vec![EMPTY_PIXEL; HEIGHT as usize]; WIDTH as usize]
+#[derive(Clone)]
+pub struct Pixel {
+    hash: [u8; 32],
+    pub color: Color,
 }
 
-pub fn serialize_colors(canvas: &Canvas) -> Vec<u8> {
-    // serialize entire canvas into an array of only colors
-    canvas.iter().map(
-        |column| column.iter().map(|(_, color)| *color)
-    ).flatten().collect()
-}
+impl Pixel {
+    pub fn new(hash: [u8; 32], color: Color) -> Pixel {
+        Pixel { hash, color }
+    }
 
-pub fn get_pixel(canvas: Canvas, x: u16, y: u16) -> Pixel {
-    // TODO: bounds check?
-    canvas[x as usize][y as usize]
-}
-
-pub fn set_pixel(canvas: &mut Canvas, x: u16, y: u16, p: Pixel) -> Result<(), String> {
-    match (x < WIDTH, y < HEIGHT) {
-        (true, true) => {
-            canvas[x as usize][y as usize] = p;
-            Ok(())
+    pub fn new_rand(rng: &mut rand::rngs::ThreadRng) -> Pixel {
+        Pixel {
+            hash: [0u8; 32],
+            color: rng.gen_range(0..3),
         }
-        (false, _) => { Err(format!("x should be less than {}", WIDTH)) }
-        (_, false) => { Err(format!("y should be less than {}", HEIGHT)) }
     }
 }
 
-pub fn parse_pixel(bytes: [u8; 37]) -> Result<(u16, u16, Pixel), String> {
-    // parse the pixel data from a pixel-NFT transaction
-    let hash: [u8; 32] = read_hash_slice(&bytes[0..32]);
-    let x: u16 = u16::from_be_bytes([bytes[32], bytes[33]]);
-    let y: u16 = u16::from_be_bytes([bytes[34], bytes[35]]);
-    let color: u8 = bytes[36];
-    match (x < WIDTH, y < HEIGHT, color < NUM_COLORS) {
-        (true,  true,  true ) => { Ok((x, y, (hash, color))) }
-        (false, _,     _    ) => { Err(format!("x should be less than {}", WIDTH)) }
-        (_,     false, _    ) => { Err(format!("y should be less than {}", HEIGHT)) }
-        (_,     _,     false) => { Err(format!("color should be less than {}", NUM_COLORS)) }
-    }
+#[derive(Clone)]
+pub struct Canvas {
+    canvas: Vec<Vec<Pixel>>,
 }
 
-fn read_hash_slice(slice: &[u8]) -> [u8; 32] {
-    // try to convert a 32 byte slice into a 32 byte array
-    slice.try_into().expect("Unreachable: Slice was incorrect length.")
+impl Canvas {
+    pub fn new_test() -> Canvas {
+        let mut rng = rand::thread_rng();
+        let mut canvas = Vec::new();
+        for _ in 0..HEIGHT {
+            let mut row = Vec::new();
+            for _ in 0..WIDTH {
+                row.push(Pixel::new_rand(&mut rng));
+            }
+            canvas.push(row);
+        }
+        Canvas { canvas }
+    }
+
+    pub fn serialize_colors(self) -> Vec<u8> {
+        // serialize entire canvas into an array of only colors
+        self.canvas
+            .iter()
+            .map(|column| column.iter().map(|p| p.color))
+            .flatten()
+            .collect()
+    }
+
+    pub fn get_pixel(self, x: usize, y: usize) -> Result<Pixel, String> {
+        // TODO: bounds check?
+        if x < WIDTH && y < HEIGHT {
+            match self.canvas.get(x) {
+                Some(row) => match row.get(y) {
+                    Some(p) => Ok(p.clone()),
+                    None => Err(format!("Could not find row {}", y)),
+                },
+                None => Err(format!("Could not find column {}", x)),
+            }
+        } else {
+            Err(format!(
+                "Index ({}, {}) out of bounds ({}, {})",
+                x, y, WIDTH, HEIGHT
+            ))
+        }
+    }
+
+    pub fn set_pixel(mut self, x: usize, y: usize, p: Pixel) -> Result<(), String> {
+        match (x < WIDTH, y < HEIGHT) {
+            (true, true) => {
+                self.canvas[x as usize][y as usize] = p;
+                Ok(())
+            }
+            (false, _) => Err(format!("x should be less than {}", WIDTH)),
+            (_, false) => Err(format!("y should be less than {}", HEIGHT)),
+        }
+    }
+
+    pub fn parse_pixel(bytes: [u8; 37]) -> Result<(usize, usize, Pixel), String> {
+        // parse the pixel data from a pixel-NFT transaction
+        let mut hash: [u8; 32] = [0u8; 32];
+        hash.copy_from_slice(&bytes[0..32]);
+        let x: usize = ((bytes[32] as usize) << 8) + (bytes[33] as usize);
+        let y: usize = ((bytes[34] as usize) << 8) + (bytes[35] as usize);
+        let color: u8 = bytes[36];
+        match (x < WIDTH, y < HEIGHT, color < NUM_COLORS) {
+            (true, true, true) => Ok((x, y, Pixel::new(hash, color))),
+            (false, _, _) => Err(format!("x should be less than {}", WIDTH)),
+            (_, false, _) => Err(format!("y should be less than {}", HEIGHT)),
+            (_, _, false) => Err(format!("color should be less than {}", NUM_COLORS)),
+        }
+    }
 }
