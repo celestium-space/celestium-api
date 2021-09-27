@@ -8,7 +8,7 @@ stages:
 
 variables:
   # image with have name "$project:$branch" like "captain:master"
-  IMAGE_NAME: registry.gitlab.com/artificialmind/$CI_PROJECT_NAME:$CI_COMMIT_REF_SLUG
+  IMAGE_NAME: registry.gitlab.com/artificialmind/mind-future/celestium/celestium-api:$CI_COMMIT_REF_SLUG
   # tell gitlab to clone submodules (needed for celestium-lib)
   GIT_SUBMODULE_STRATEGY: recursive
 
