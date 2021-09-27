@@ -19,6 +19,7 @@ mongodb = "2.0.0"
 serde = { version = "1.0", features = ["derive"] }
 sha3 = "0.9"
 secp256k1 = "0.19"
+serde_json = "1.0.59"
 
 [dependencies.celestium]
 path = "../celestium-lib"
