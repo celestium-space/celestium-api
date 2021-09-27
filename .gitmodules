@@ -1,3 +1,3 @@
 [submodule "celestium-lib"]
 	path = celestium-lib
-	url = git@gitlab.com:artificialmind/mind-future/celestium/celestium-lib.git
+	url = ../celestium-lib
