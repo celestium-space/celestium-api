@@ -29,21 +29,20 @@ It serves three main purposes:
 
 Everything is done via websockets. Communication is split into a several of packet types, they are:
 
-| CMD Opcode | Direction | Description          | Endpoint | Data                                 |
-| ---------- | --------- | -------------------- | -------- | ------------------------------------ |
-| 0x00       | API -> C  | entire image         | `/`      | `<image:[u8; 1_000_000]>`            |
-| 0x01       | API -> C  | update pixel         | `/`      | `<x:u16><y:u16><color:u8>`           |
-| 0x02       | API -> C  | error                | `/`      | `<0x45:u8><msg:str>`                 |
-| 0x03       | C -> API  | transaction          | `/`      | `<transaction:[u8]>`                 |
-| 0x04       | C -> API  | get pixel hash       | `/`      | `<x:u16><y:u16>`                     |
-| 0x05       | API -> C  | pixel hash response  | `/`      | `<pixel_hash:[u8]><block_hash:[u8]>` |
-| 0x06       | C -> API  | get store items      | `/`      | `<page_nr:u64>`                      |
-| 0x07       | API -> C  | store items response | `/`      | `<store_items:JSON>`                 |
-| 0x08       | C -> API  | buy store item       | `/`      | `<id:[u8]>`                          |
-| 0x09       | API -> C  | transaction          | `/`      | `<transaction:[u8]>`                 |
-| 0x0a       | C -> API  | get user data        | `/`      | `<public_key:[u8; 32]>`              |
-| 0x0b       | C -> API  | get entire image     | `/`      | `<none>`                             |
-| 0x0c       | API -> C  | user data            | `/`      | `<total_celestium:u64>`              |
+| CMD Opcode | Direction | Description           | Data                                 |
+| ---------- | --------- | --------------------  | ------------------------------------ |
+| 0x01       | C -> API  | get entire image      |                                      |
+| 0x02       | API -> C  | entire image response | `<image:[u8; 1_000_000]>`            |
+| 0x03       | API -> C  | update pixel          | `<x:u16><y:u16><color:u8>`           |
+| 0x04       | C -> API  | unmined transaction   | `<transaction:[u8]>`                 |
+| 0x05       | API -> C  | mined transaction     | `<transaction:[u8]>`                 |
+| 0x06       | C -> API  | get pixel data        | `<x:u16><y:u16>`                     |
+| 0x07       | API -> C  | pixel data response   | `<pixel_hash:[u8]><block_hash:[u8]>` |
+| 0x08       | C -> API  | get store items       | `<from_index:u32><to_index:u32>`     |
+| 0x09       | API -> C  | store items response  | `<store_items:JSON>`                 |
+| 0x0a       | C -> API  | buy store item        | `<id:[u8]>`                          |
+| 0x0b       | C -> API  | get user data         | `<public_key:[u8; 32]>`              |
+| 0x0c       | API -> C  | user data             | `<total_celestium:u64>`              |
 
 ## How to use/Use cases (client)
 ### Pixel Place
