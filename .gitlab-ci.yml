@@ -1,0 +1,25 @@
+image: docker:git
+
+services:
+  - docker:dind
+
+stages:
+  - build
+
+variables:
+  # image with have name "$project:$branch" like "captain:master"
+  IMAGE_NAME: registry.gitlab.com/artificialmind/$CI_PROJECT_NAME:$CI_COMMIT_REF_SLUG
+  # tell gitlab to clone submodules (needed for celestium-lib)
+  GIT_SUBMODULE_STRATEGY: recursive
+
+before_script:
+  - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN registry.gitlab.com
+
+build:
+  stage: build
+  script:
+    - docker build -t $IMAGE_NAME .
+    - docker push $IMAGE_NAME
+  only:
+    - master
+    - dev
