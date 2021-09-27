@@ -15,8 +15,11 @@ use std::{
 // external
 use cached::proc_macro::cached;
 use futures::{SinkExt, StreamExt, TryFutureExt};
+use mongodb::{bson::doc, options::ClientOptions, Client, Database};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
+use secp256k1::{PublicKey, SecretKey};
+use sha3::{Digest, Sha3_256};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::{filters::ws::Message, Filter, Rejection, Reply};
@@ -24,9 +27,12 @@ use warp::{filters::ws::Message, Filter, Rejection, Reply};
 // here
 use crate::canvas::PIXEL_HASH_SIZE;
 use celestium::{
+    ec_key_serialization::PUBLIC_KEY_COMPRESSED_SIZE,
     merkle_forest::HASH_SIZE,
     serialize::Serialize,
     transaction::{Transaction, BASE_TRANSACTION_MESSAGE_LEN},
+    transaction_output::TransactionOutput,
+    transaction_value::TransactionValue,
     wallet::{BinaryWallet, Wallet},
 };
 
@@ -35,7 +41,69 @@ mod canvas;
 ////////////////////////////////////////////////// !!! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 type SharedCanvas = Arc<Mutex<canvas::Canvas>>; // !!! IMPORTANT! Always lock SharedCanvas before SharedWallet  !!!
 type SharedWallet = Arc<Mutex<Box<Wallet>>>; ///// !!! IMPORTANT! to await potential dead locks (if using both) !!!
-type Clients = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
+type WSClients = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct StoreItem {
+    _id: String,
+    object_type: String,
+    semi_major_axis_in_au: f64,
+    eccentricity: f64,
+    value_in_usd: f64,
+    est_profit_in_usd: f64,
+    delta_v_in_km_s: f64,
+    minimum_orbit_intersection_distance_in_au: f64,
+    group: String,
+    store_price_in_dust: usize,
+}
+
+impl StoreItem {
+    fn new(
+        name: String,
+        object_type: String,
+        semi_major_axis_in_au: f64,
+        eccentricity: f64,
+        value_in_usd: f64,
+        est_profit_in_usd: f64,
+        delta_v_in_km_s: f64,
+        minimum_orbit_intersection_distance_in_au: f64,
+        group: String,
+        store_price_in_dust: usize,
+    ) -> StoreItem {
+        StoreItem {
+            _id: name,
+            object_type,
+            semi_major_axis_in_au,
+            eccentricity,
+            value_in_usd,
+            est_profit_in_usd,
+            delta_v_in_km_s,
+            minimum_orbit_intersection_distance_in_au,
+            group,
+            store_price_in_dust,
+        }
+    }
+
+    fn hash(&self) -> [u8; HASH_SIZE] {
+        let mut hash = [0u8; HASH_SIZE];
+        let mut self_serialized = Vec::new();
+        self_serialized.append(&mut self._id.as_bytes().to_vec());
+        self_serialized.append(&mut self.semi_major_axis_in_au.to_ne_bytes().to_vec());
+        self_serialized.append(&mut self.eccentricity.to_ne_bytes().to_vec());
+        self_serialized.append(&mut self.value_in_usd.to_ne_bytes().to_vec());
+        self_serialized.append(&mut self.est_profit_in_usd.to_ne_bytes().to_vec());
+        self_serialized.append(&mut self.delta_v_in_km_s.to_ne_bytes().to_vec());
+        self_serialized.append(
+            &mut self
+                .minimum_orbit_intersection_distance_in_au
+                .to_ne_bytes()
+                .to_vec(),
+        );
+        self_serialized.append(&mut self.group.as_bytes().to_vec());
+        hash.copy_from_slice(Sha3_256::digest(&self_serialized).as_slice());
+        hash
+    }
+}
 
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -59,6 +127,45 @@ enum CMDOpcodes {
 
 #[tokio::main]
 async fn main() {
+    // connect to MongoDB
+    let mongodb_connection_string = env::var("MONGODB_CONNECTION_STRING")
+        .unwrap_or_else(|_| "mongodb://admin:admin@localhost/".to_string());
+
+    let mongodb_database_name =
+        env::var("MONGO_DATABASE_NAME").unwrap_or_else(|_| "celestium".to_string());
+
+    let mut client_options = match ClientOptions::parse(&mongodb_connection_string).await {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Could not create mongo client options: {}", e);
+            return;
+        }
+    };
+
+    // Manually set an option
+    client_options.app_name = Some("celestium".to_string());
+    // Get a handle to the cluster
+    let mongodb_client = match Client::with_options(client_options) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Could not set app name: {}", e);
+            return;
+        }
+    };
+
+    // Ping the server to see if you can connect to the cluster
+    let database = mongodb_client.database(&mongodb_database_name);
+    if let Err(e) = database.run_command(doc! {"ping": 1}, None).await {
+        println!(
+            "Could not ping database \"{}\": {}",
+            mongodb_database_name, e
+        );
+        return;
+    };
+    let database = warp::any().map(move || database.clone());
+
+    println!("MongoDB Connected successfully.");
+
     // initialize wallet
     let wallet = match load_wallet() {
         Ok(w) => w,
@@ -76,22 +183,23 @@ async fn main() {
 
     // initialize empty canvas
     print!("Initializing canvas...");
-    let canvas = canvas::Canvas::new_test();
-    let shared_canvas = Arc::new(Mutex::new(canvas));
+    let shared_canvas = canvas::Canvas::new_test();
+    let shared_canvas = Arc::new(Mutex::new(shared_canvas));
     println!(" Done!");
 
     // Keep track of all connected users, key is usize, value
     // is a websocket sender.
-    let clients = Clients::default();
+    let ws_clients = WSClients::default();
     // Turn our "state" into a new Filter...
-    let clients = warp::any().map(move || clients.clone());
+    let ws_clients = warp::any().map(move || ws_clients.clone());
 
     // configure ws route
     let ws_route = warp::path::end()
         .and(warp::ws())
         .and(with_wallet(shared_wallet))
         .and(with_canvas(shared_canvas))
-        .and(clients)
+        .and(ws_clients)
+        .and(database)
         .and_then(ws_handler)
         .with(warp::cors().allow_any_origin());
 
@@ -130,6 +238,7 @@ fn load_wallet() -> Result<Wallet, String> {
             mf_branches_bin: load("mf_branches")?,
             mf_leafs_bin: load("mf_leafs")?,
             unspent_outputs_bin: load("unspent_outputs")?,
+            nft_lookups_bin: load("nft_lookups")?,
             root_lookup_bin: load("root_lookup")?,
             off_chain_transactions_bin: load("off_chain_transactions")?,
         },
@@ -154,12 +263,12 @@ fn save_wallet(wallet: &Wallet) -> Result<(), String> {
     save("mf_branches", wallet_bin.mf_branches_bin)??;
     save("mf_leafs", wallet_bin.mf_leafs_bin)??;
     save("unspent_outputs", wallet_bin.unspent_outputs_bin)??;
+    save("nft_lookups", wallet_bin.nft_lookups_bin)??;
     save("root_lookup", wallet_bin.root_lookup_bin)??;
     save(
         "off_chain_transactions",
         wallet_bin.off_chain_transactions_bin,
     )??;
-    println!("Wrote wallet to disk.");
     Ok(())
 }
 
@@ -192,12 +301,13 @@ async fn ws_handler(
     ws: warp::ws::Ws,
     wallet: SharedWallet,
     canvas: SharedCanvas,
-    clients: Clients,
+    clients: WSClients,
+    database: Database,
 ) -> Result<impl Reply, Rejection> {
     // weird boilerplate because I don't know why
     // this async function seems to just pass stuff on to another async function
     // but I don't know how to inline it 🤷
-    Ok(ws.on_upgrade(move |socket| client_connection(socket, wallet, canvas, clients)))
+    Ok(ws.on_upgrade(move |socket| client_connection(socket, wallet, canvas, clients, database)))
 }
 
 macro_rules! ws_error {
@@ -225,7 +335,8 @@ async fn client_connection(
     ws: warp::ws::WebSocket,
     wallet: SharedWallet,
     canvas: SharedCanvas,
-    clients: Clients,
+    clients: WSClients,
+    database: Database,
 ) {
     // keeps a client connection open, pass along incoming messages
     println!("Establishing client connection... {:?}", ws);
@@ -241,7 +352,7 @@ async fn client_connection(
             sender
                 .send(message)
                 .unwrap_or_else(|e| {
-                    println!("websocket send error: {}", e);
+                    println!("Websocket send error: {}", e);
                 })
                 .await;
         }
@@ -258,7 +369,7 @@ async fn client_connection(
                 break;
             }
         };
-        handle_ws_message(message, my_id, wallet.clone(), canvas.clone(), &clients).await;
+        handle_ws_message(message, my_id, &wallet, &canvas, &clients, &database).await;
     }
 
     clients.write().await.remove(&my_id);
@@ -267,9 +378,10 @@ async fn client_connection(
 async fn handle_ws_message(
     message: Message,
     my_id: usize,
-    wallet: SharedWallet,
-    canvas: SharedCanvas,
-    clients: &Clients,
+    wallet: &SharedWallet,
+    canvas: &SharedCanvas,
+    clients: &WSClients,
+    database: &Database,
 ) {
     // this is the function that actually receives a message
     // validate it, add it to the blockchain, then exit.
@@ -298,6 +410,12 @@ async fn handle_ws_message(
         Some(CMDOpcodes::GetPixelData) => {
             parse_get_pixel_data(&binary_message[1..], sender, wallet, canvas).await
         }
+        Some(CMDOpcodes::BuyStoreItem) => {
+            parse_buy_store_item(&binary_message[1..], sender, wallet, database).await
+        }
+        Some(CMDOpcodes::GetStoreItems) => {
+            parse_get_store_items(&binary_message[1..], sender, wallet, database).await
+        }
         _ => {
             ws_error!(
                 sender,
@@ -307,11 +425,96 @@ async fn handle_ws_message(
     }
 }
 
+async fn parse_buy_store_item(
+    bin_parameters: &[u8],
+    sender: &mpsc::UnboundedSender<Message>,
+    wallet: &SharedWallet,
+    database: &Database,
+) {
+    let mut pk = [0u8; PUBLIC_KEY_COMPRESSED_SIZE];
+    pk.copy_from_slice(&bin_parameters[..PUBLIC_KEY_COMPRESSED_SIZE]);
+    let pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(&pk, &mut 0));
+
+    let item_name = match std::str::from_utf8(&bin_parameters[PUBLIC_KEY_COMPRESSED_SIZE..]) {
+        Ok(i) => i,
+        Err(e) => {
+            ws_error!(sender, format!("Could not parse object name: {}", e));
+        }
+    };
+
+    let store_collection = database.collection::<StoreItem>("store");
+
+    let filter = doc! {"_id": item_name};
+    let item = match store_collection.find_one(filter, None).await {
+        Ok(Some(s)) => s,
+        Err(e) => {
+            ws_error!(
+                sender,
+                format!(
+                    "Could not find Store Item with ID \"{}\": {}",
+                    &item_name, e
+                )
+            );
+        }
+        _ => {
+            ws_error!(
+                sender,
+                format!("Could not find Store Item with ID \"{}\"", &item_name)
+            );
+        }
+    };
+
+    {
+        let real_wallet = wallet.lock().await;
+        let (dust, mut inputs, _) = unwrap_or_ws_error!(
+            sender,
+            real_wallet.collect_for_coin_transfer(
+                &unwrap_or_ws_error!(
+                    sender,
+                    TransactionValue::new_coin_transfer(item.store_price_in_dust as u128, 0)
+                ),
+                pk
+            )
+        );
+        //real_wallet.
+        let change = dust - item.store_price_in_dust as u128;
+        let mut outputs = vec![TransactionOutput::new(
+            unwrap_or_ws_error!(
+                sender,
+                TransactionValue::new_coin_transfer(item.store_price_in_dust as u128, 0)
+            ),
+            pk,
+        )];
+        if change > 0 {
+            outputs.push(TransactionOutput::new(
+                unwrap_or_ws_error!(sender, TransactionValue::new_coin_transfer(change, 0)),
+                pk,
+            ));
+        }
+
+        let mut transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
+        drop(real_wallet);
+    }
+
+    println!("{:?}", item);
+}
+
+async fn parse_get_store_items(
+    bin_parameters: &[u8],
+    sender: &mpsc::UnboundedSender<Message>,
+    wallet: &SharedWallet,
+    database: &Database,
+) {
+    let store_collection = database.collection::<StoreItem>("store");
+    let filter = doc! {"range": [0,10]};
+    let items = store_collection.find(filter, None);
+}
+
 async fn parse_get_pixel_data(
     bin_parameters: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
-    wallet: SharedWallet,
-    canvas: SharedCanvas,
+    wallet: &SharedWallet,
+    canvas: &SharedCanvas,
 ) {
     if bin_parameters.len() != 4 {
         ws_error!(
@@ -349,9 +552,9 @@ async fn parse_get_pixel_data(
 async fn parse_transaction(
     bin_transaction: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
-    wallet: SharedWallet,
-    canvas: SharedCanvas,
-    clients: &Clients,
+    wallet: &SharedWallet,
+    canvas: &SharedCanvas,
+    clients: &WSClients,
 ) {
     let transaction = unwrap_or_ws_error!(
         sender,
@@ -395,7 +598,6 @@ async fn parse_transaction(
         update_pixel_binary_message[0] = CMDOpcodes::UpdatePixel as u8;
         update_pixel_binary_message[1..]
             .copy_from_slice(&base_transaction_message[PIXEL_HASH_SIZE..]);
-        println!("Len: {}", clients.read().await.len());
         for tx in clients.read().await.values() {
             if let Err(e) = tx.send(Message::binary(update_pixel_binary_message)) {
                 println!("Could not send updated pixel: {}", e);
