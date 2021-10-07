@@ -1,6 +1,7 @@
 use celestium::transaction::BASE_TRANSACTION_MESSAGE_LEN;
 /* Maniuplating a 1000x1000 pixel canvas */
 use rand::Rng;
+use sha3::{Digest, Sha3_224};
 
 pub(crate) const PIXEL_HASH_SIZE: usize = 28;
 const NUM_COLORS: u8 = 16;
@@ -11,20 +12,33 @@ pub type Color = u8;
 
 #[derive(Clone)]
 pub struct Pixel {
-    pub hash: [u8; PIXEL_HASH_SIZE],
+    back_hash: [u8; PIXEL_HASH_SIZE],
     pub color: Color,
 }
 
 impl Pixel {
-    pub fn new(hash: [u8; PIXEL_HASH_SIZE], color: Color) -> Pixel {
-        Pixel { hash, color }
+    pub fn new(back_hash: [u8; PIXEL_HASH_SIZE], color: Color) -> Pixel {
+        Pixel { back_hash, color }
     }
 
     pub fn new_rand(rng: &mut rand::rngs::ThreadRng) -> Pixel {
         Pixel {
-            hash: [0u8; PIXEL_HASH_SIZE],
+            back_hash: [0u8; PIXEL_HASH_SIZE],
             color: rng.gen_range(0..3),
         }
+    }
+
+    pub fn hash(self, x: u16, y: u16) -> [u8; PIXEL_HASH_SIZE] {
+        let mut to_digest = [0u8; 33];
+        to_digest[..PIXEL_HASH_SIZE].copy_from_slice(&self.back_hash);
+        to_digest[PIXEL_HASH_SIZE] = (x >> 8) as u8;
+        to_digest[PIXEL_HASH_SIZE + 1] = (x & 0xff) as u8;
+        to_digest[PIXEL_HASH_SIZE + 2] = (y >> 8) as u8;
+        to_digest[PIXEL_HASH_SIZE + 3] = (y & 0xff) as u8;
+        to_digest[PIXEL_HASH_SIZE + 4] = self.color as u8;
+        let mut hash = [0u8; PIXEL_HASH_SIZE];
+        hash.copy_from_slice(&Sha3_224::digest(&to_digest));
+        hash
     }
 }
 
@@ -35,13 +49,13 @@ pub struct Canvas {
 
 impl Canvas {
     pub fn new_test() -> Canvas {
-        let mut rng = rand::thread_rng();
+        //let mut rng = rand::thread_rng();
         let mut canvas = Vec::new();
         for _ in 0..HEIGHT {
             let mut row = Vec::new();
             for _ in 0..WIDTH {
-                //row.push(Pixel::new([0u8; PIXEL_HASH_SIZE], 0));
-                row.push(Pixel::new_rand(&mut rng));
+                row.push(Pixel::new([0u8; PIXEL_HASH_SIZE], 0));
+                //row.push(Pixel::new_rand(&mut rng));
             }
             canvas.push(row);
         }
