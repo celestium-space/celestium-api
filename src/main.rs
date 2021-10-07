@@ -111,7 +111,6 @@ static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 #[repr(u8)]
 #[derive(FromPrimitive)]
 enum CMDOpcodes {
-    Error = 0x00,
     GetEntireImage = 0x01,
     EntireImage = 0x02,
     UpdatePixel = 0x03,
@@ -543,7 +542,48 @@ async fn parse_get_store_item(
 
     if let Err(e) = sender.send(Message::binary(buffer)) {
         println!("Could not send pixel hash: {}", e);
-    };
+    }
+    // // check length of params
+    // if bin_parameters.len() != 16 {
+    //     ws_error!(
+    //         sender,
+    //         format!(
+    //             "Expected message len of 16 for CMD opcode {:x} (GetStoreItems)",
+    //             CMDOpcodes::GetStoreItems as u8,
+    //         )
+    //     );
+    // }
+
+    // // parse params
+    // let from: u32 = ((bin_parameters[0] as u32) << 24) + ((bin_parameters[1] as u32) << 16) + ((bin_parameters[2] as u32) << 8) + ((bin_parameters[3] as u32));
+    // let to: u32 = ((bin_parameters[4] as u32) << 24) + ((bin_parameters[5] as u32) << 16) + ((bin_parameters[6] as u32) << 8) + ((bin_parameters[7] as u32));
+
+    // // dance with mongo
+    // let store_collection = database.collection::<StoreItem>("store");
+    // let filter = doc! {"range": [from, to]};
+    // let mongo_result = store_collection.find(filter, None).await;
+
+    // // parse mongo result
+    // let mut cursor = unwrap_or_ws_error!(
+    //     sender,
+    //     mongo_result.map_err(|_| "Failed querying mongodb for asteroids.")
+    // );
+
+    // // parse to json
+    // let mut json_results: Vec<String> = vec![];
+    // while let Some(Ok(asteroid)) = cursor.next().await {
+    //   match serde_json::to_string(&asteroid) {
+    //       Ok(a) => json_results.push(a),
+    //       Err(_) => { ws_error!(sender, "Failed parsing an asteroid from Mongo."); }
+    //   }
+    // }
+
+    // // put a bow on it
+    // let json_array: String = "[".to_string() + &json_results.join(",") + "]";
+    // let response_bytes: &[u8] = &[&[CMDOpcodes::StoreItems as u8], json_array.as_bytes()].concat();
+    // if let Err(e) = sender.send(Message::binary(response_bytes)) {
+    //     println!("Could not send StoreItems: {}", e);
+    // };
 }
 
 async fn parse_get_pixel_data(

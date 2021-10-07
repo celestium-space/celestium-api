@@ -1,0 +1,3 @@
+[submodule "celestium-lib"]
+	path = celestium-lib
+	url = ../celestium-lib
