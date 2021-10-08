@@ -530,11 +530,11 @@ async fn parse_get_store_item(
     database: &Database,
 ) {
     let mut rng = rand::thread_rng();
-    let img_nr = rng.gen_range(0..7);
+    let img_nr = rng.gen_range(0..3);
     // let filename = format!("./images/{}.jpg", img_nr);
     // let mut f = File::open(&filename).expect("no file found");
     // let metadata = fs::metadata(&filename).expect("unable to read metadata");
-    let image_url = format!("/images/{}.jpg", img_nr);
+    let image_url = format!("/images/{}.gif", img_nr);
     let image_url = image_url.as_bytes();
     let mut buffer = vec![0; (image_url.len() + 1) as usize];
     buffer[0] = CMDOpcodes::StoreItem as u8;
