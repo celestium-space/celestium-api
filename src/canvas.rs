@@ -54,7 +54,7 @@ impl Canvas {
         for _ in 0..HEIGHT {
             let mut row = Vec::new();
             for _ in 0..WIDTH {
-                row.push(Pixel::new([0u8; PIXEL_HASH_SIZE], 0));
+                row.push(Pixel::new([0u8; PIXEL_HASH_SIZE], 7));
                 //row.push(Pixel::new_rand(&mut rng));
             }
             canvas.push(row);
