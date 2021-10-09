@@ -2,8 +2,8 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     env,
-    fs::read,
     fs::File,
+    fs::{self, read},
     io::prelude::*,
     path::PathBuf,
     sync::{
@@ -18,7 +18,8 @@ use futures::{SinkExt, StreamExt, TryFutureExt};
 use mongodb::{bson::doc, options::ClientOptions, Client, Database};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
-use secp256k1::{PublicKey, SecretKey};
+use rand::Rng;
+use secp256k1::PublicKey;
 use sha3::{Digest, Sha3_256};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -117,8 +118,8 @@ enum CMDOpcodes {
     MinedTransaction = 0x05,
     GetPixelData = 0x06,
     PixelData = 0x07,
-    GetStoreItems = 0x08,
-    StoreItems = 0x09,
+    GetStoreItem = 0x08,
+    StoreItem = 0x09,
     BuyStoreItem = 0x0a,
     GetUserData = 0x0b,
     UserData = 0x0c,
@@ -178,11 +179,27 @@ async fn main() {
             }
         }
     };
+    // for ((block_hash, transaction_hash, index), transaction_output) in wallet.unspent_outputs.iter()
+    // {
+    //     wallet.off_chain_transactions[]
+    //     // if transaction_output.value.is
+    // }
     let shared_wallet = Arc::new(Mutex::new(Box::new(wallet)));
 
     // initialize empty canvas
     print!("Initializing canvas...");
     let shared_canvas = canvas::Canvas::new_test();
+    let real_wallet = shared_wallet.lock().await;
+    for (hash, transaction) in real_wallet.off_chain_transactions.clone() {
+        if transaction.is_id_base_transaction() {
+            let (x, y, transaction_pixel) =
+                canvas::Canvas::parse_pixel(transaction.get_base_transaction_message().unwrap())
+                    .unwrap();
+            let canvas_pixel = shared_canvas.get_pixel(x, y);
+            //if canvas_pixel.hash
+        }
+    }
+    drop(real_wallet);
     let shared_canvas = Arc::new(Mutex::new(shared_canvas));
     println!(" Done!");
 
@@ -404,7 +421,15 @@ async fn handle_ws_message(
             }
         }
         Some(CMDOpcodes::MinedTransaction) => {
-            parse_transaction(&binary_message[1..], sender, wallet, canvas, clients).await
+            parse_transaction(
+                &binary_message[1..],
+                sender,
+                wallet,
+                canvas,
+                clients,
+                database,
+            )
+            .await
         }
         Some(CMDOpcodes::GetPixelData) => {
             parse_get_pixel_data(&binary_message[1..], sender, wallet, canvas).await
@@ -412,8 +437,8 @@ async fn handle_ws_message(
         Some(CMDOpcodes::BuyStoreItem) => {
             parse_buy_store_item(&binary_message[1..], sender, wallet, database).await
         }
-        Some(CMDOpcodes::GetStoreItems) => {
-            parse_get_store_items(&binary_message[1..], sender, wallet, database).await
+        Some(CMDOpcodes::GetStoreItem) => {
+            parse_get_store_item(&binary_message[1..], sender, wallet, database).await
         }
         _ => {
             ws_error!(
@@ -465,7 +490,7 @@ async fn parse_buy_store_item(
 
     {
         let real_wallet = wallet.lock().await;
-        let (dust, mut inputs, _) = unwrap_or_ws_error!(
+        let (dust, inputs, _) = unwrap_or_ws_error!(
             sender,
             real_wallet.collect_for_coin_transfer(
                 &unwrap_or_ws_error!(
@@ -491,60 +516,74 @@ async fn parse_buy_store_item(
             ));
         }
 
-        let mut transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
+        let transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
         drop(real_wallet);
     }
 
     println!("{:?}", item);
 }
 
-async fn parse_get_store_items(
+async fn parse_get_store_item(
     bin_parameters: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
     wallet: &SharedWallet,
     database: &Database,
 ) {
-    // check length of params
-    if bin_parameters.len() != 16 {
-        ws_error!(
-            sender,
-            format!(
-                "Expected message len of 16 for CMD opcode {:x} (GetStoreItems)",
-                CMDOpcodes::GetStoreItems as u8,
-            )
-        );
+    let mut rng = rand::thread_rng();
+    let img_nr = rng.gen_range(0..3);
+    // let filename = format!("./images/{}.jpg", img_nr);
+    // let mut f = File::open(&filename).expect("no file found");
+    // let metadata = fs::metadata(&filename).expect("unable to read metadata");
+    let image_url = format!("/images/{}.gif", img_nr);
+    let image_url = image_url.as_bytes();
+    let mut buffer = vec![0; (image_url.len() + 1) as usize];
+    buffer[0] = CMDOpcodes::StoreItem as u8;
+    buffer[1..].copy_from_slice(image_url);
+
+    if let Err(e) = sender.send(Message::binary(buffer)) {
+        println!("Could not send pixel hash: {}", e);
     }
+    // // check length of params
+    // if bin_parameters.len() != 16 {
+    //     ws_error!(
+    //         sender,
+    //         format!(
+    //             "Expected message len of 16 for CMD opcode {:x} (GetStoreItems)",
+    //             CMDOpcodes::GetStoreItems as u8,
+    //         )
+    //     );
+    // }
 
-    // parse params
-    let from: u32 = ((bin_parameters[0] as u32) << 24) + ((bin_parameters[1] as u32) << 16) + ((bin_parameters[2] as u32) << 8) + ((bin_parameters[3] as u32));
-    let to: u32 = ((bin_parameters[4] as u32) << 24) + ((bin_parameters[5] as u32) << 16) + ((bin_parameters[6] as u32) << 8) + ((bin_parameters[7] as u32));
+    // // parse params
+    // let from: u32 = ((bin_parameters[0] as u32) << 24) + ((bin_parameters[1] as u32) << 16) + ((bin_parameters[2] as u32) << 8) + ((bin_parameters[3] as u32));
+    // let to: u32 = ((bin_parameters[4] as u32) << 24) + ((bin_parameters[5] as u32) << 16) + ((bin_parameters[6] as u32) << 8) + ((bin_parameters[7] as u32));
 
-    // dance with mongo
-    let store_collection = database.collection::<StoreItem>("store");
-    let filter = doc! {"range": [from, to]};
-    let mongo_result = store_collection.find(filter, None).await;
+    // // dance with mongo
+    // let store_collection = database.collection::<StoreItem>("store");
+    // let filter = doc! {"range": [from, to]};
+    // let mongo_result = store_collection.find(filter, None).await;
 
-    // parse mongo result
-    let mut cursor = unwrap_or_ws_error!(
-        sender,
-        mongo_result.map_err(|_| "Failed querying mongodb for asteroids.")
-    );
+    // // parse mongo result
+    // let mut cursor = unwrap_or_ws_error!(
+    //     sender,
+    //     mongo_result.map_err(|_| "Failed querying mongodb for asteroids.")
+    // );
 
-    // parse to json
-    let mut json_results: Vec<String> = vec![];
-    while let Some(Ok(asteroid)) = cursor.next().await {
-      match serde_json::to_string(&asteroid) {
-          Ok(a) => json_results.push(a),
-          Err(_) => { ws_error!(sender, "Failed parsing an asteroid from Mongo."); }
-      }
-    }
+    // // parse to json
+    // let mut json_results: Vec<String> = vec![];
+    // while let Some(Ok(asteroid)) = cursor.next().await {
+    //   match serde_json::to_string(&asteroid) {
+    //       Ok(a) => json_results.push(a),
+    //       Err(_) => { ws_error!(sender, "Failed parsing an asteroid from Mongo."); }
+    //   }
+    // }
 
-    // put a bow on it
-    let json_array: String = "[".to_string() + &json_results.join(",") + "]";
-    let response_bytes: &[u8] = &[&[CMDOpcodes::StoreItems as u8], json_array.as_bytes()].concat();
-    if let Err(e) = sender.send(Message::binary(response_bytes)) {
-        println!("Could not send StoreItems: {}", e);
-    };
+    // // put a bow on it
+    // let json_array: String = "[".to_string() + &json_results.join(",") + "]";
+    // let response_bytes: &[u8] = &[&[CMDOpcodes::StoreItems as u8], json_array.as_bytes()].concat();
+    // if let Err(e) = sender.send(Message::binary(response_bytes)) {
+    //     println!("Could not send StoreItems: {}", e);
+    // };
 }
 
 async fn parse_get_pixel_data(
@@ -571,7 +610,8 @@ async fn parse_get_pixel_data(
         let x: usize = ((bin_parameters[0] as usize) << 8) + (bin_parameters[1] as usize);
         let y: usize = ((bin_parameters[2] as usize) << 8) + (bin_parameters[3] as usize);
         let pixel = unwrap_or_ws_error!(sender, real_canvas.get_pixel(x, y));
-        pixel_hash_response[1..PIXEL_HASH_SIZE + 1].copy_from_slice(&pixel.hash);
+        pixel_hash_response[1..PIXEL_HASH_SIZE + 1]
+            .copy_from_slice(&pixel.hash(x as u16, y as u16));
         drop(real_canvas);
     }
     {
@@ -592,6 +632,7 @@ async fn parse_transaction(
     wallet: &SharedWallet,
     canvas: &SharedCanvas,
     clients: &WSClients,
+    database: &Database,
 ) {
     let transaction = unwrap_or_ws_error!(
         sender,
@@ -618,7 +659,7 @@ async fn parse_transaction(
         canvas::Canvas::parse_pixel(base_transaction_message)
     );
     let current_pixel_hash = unwrap_or_ws_error!(sender, real_canvas.get_pixel(x, y))
-        .hash
+        .hash(x as u16, y as u16)
         .to_vec();
     let new_pixel_back_ref_hash = base_transaction_message[..PIXEL_HASH_SIZE].to_vec();
     if current_pixel_hash != new_pixel_back_ref_hash {
@@ -631,6 +672,8 @@ async fn parse_transaction(
         );
     } else {
         unwrap_or_ws_error!(sender, real_canvas.set_pixel(x, y, pixel));
+        let canvas_collection = database.collection::<StoreItem>("canvas");
+
         let mut update_pixel_binary_message = [0u8; 6];
         update_pixel_binary_message[0] = CMDOpcodes::UpdatePixel as u8;
         update_pixel_binary_message[1..]
