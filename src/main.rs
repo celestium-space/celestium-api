@@ -107,6 +107,7 @@ impl StoreItem {
 }
 
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
+static DUST_PER_CEL: u128 = 1000000;
 
 #[repr(u8)]
 #[derive(FromPrimitive)]
@@ -209,11 +210,14 @@ async fn main() {
     // Turn our "state" into a new Filter...
     let ws_clients = warp::any().map(move || ws_clients.clone());
 
+    let floating_outputs = Arc::new(Mutex::new(Box::new(HashSet::new())));
+
     // configure ws route
     let ws_route = warp::path::end()
         .and(warp::ws())
         .and(with_wallet(shared_wallet))
         .and(with_canvas(shared_canvas))
+        .and(with_floating_outputs(floating_outputs))
         .and(ws_clients)
         .and(database)
         .and_then(ws_handler)
@@ -302,28 +306,35 @@ fn generate_wallet() -> Result<Wallet, String> {
 fn with_wallet(
     wallet: SharedWallet,
 ) -> impl Filter<Extract = (SharedWallet,), Error = Infallible> + Clone {
-    // warp filters - how do they work?
     warp::any().map(move || wallet.clone())
 }
 
 fn with_canvas(
     canvas: SharedCanvas,
 ) -> impl Filter<Extract = (SharedCanvas,), Error = Infallible> + Clone {
-    // warp filters - how do they work?
     warp::any().map(move || canvas.clone())
+}
+
+fn with_floating_outputs(
+    floating_outputs: HashSet,
+) -> impl Filter<Extract = (HashSet,), Error = Infallible> + Clone {
+    warp::any().map(move || floating_outputs)
 }
 
 async fn ws_handler(
     ws: warp::ws::Ws,
     wallet: SharedWallet,
     canvas: SharedCanvas,
+    floating_outputs: HashSet,
     clients: WSClients,
     database: Database,
 ) -> Result<impl Reply, Rejection> {
     // weird boilerplate because I don't know why
     // this async function seems to just pass stuff on to another async function
     // but I don't know how to inline it 🤷
-    Ok(ws.on_upgrade(move |socket| client_connection(socket, wallet, canvas, clients, database)))
+    Ok(ws.on_upgrade(move |socket| {
+        client_connection(socket, wallet, canvas, floating_outputs, clients, database)
+    }))
 }
 
 macro_rules! ws_error {
@@ -351,6 +362,7 @@ async fn client_connection(
     ws: warp::ws::WebSocket,
     wallet: SharedWallet,
     canvas: SharedCanvas,
+    floating_outputs: HashSet,
     clients: WSClients,
     database: Database,
 ) {
@@ -385,7 +397,16 @@ async fn client_connection(
                 break;
             }
         };
-        handle_ws_message(message, my_id, &wallet, &canvas, &clients, &database).await;
+        handle_ws_message(
+            message,
+            my_id,
+            &wallet,
+            &canvas,
+            &floating_outputs,
+            &clients,
+            &database,
+        )
+        .await;
     }
 
     clients.write().await.remove(&my_id);
@@ -396,6 +417,7 @@ async fn handle_ws_message(
     my_id: usize,
     wallet: &SharedWallet,
     canvas: &SharedCanvas,
+    floating_outputs: &HashSet,
     clients: &WSClients,
     database: &Database,
 ) {
@@ -432,13 +454,23 @@ async fn handle_ws_message(
             .await
         }
         Some(CMDOpcodes::GetPixelData) => {
-            parse_get_pixel_data(&binary_message[1..], sender, wallet, canvas).await
+            parse_get_pixel_data(
+                &binary_message[1..],
+                sender,
+                wallet,
+                canvas,
+                floating_outputs,
+            )
+            .await
         }
         Some(CMDOpcodes::BuyStoreItem) => {
             parse_buy_store_item(&binary_message[1..], sender, wallet, database).await
         }
         Some(CMDOpcodes::GetStoreItem) => {
             parse_get_store_item(&binary_message[1..], sender, wallet, database).await
+        }
+        Some(CMDOpcodes::GetUserData) => {
+            parse_get_user_data(&binary_message[1..], sender, wallet).await
         }
         _ => {
             ws_error!(
@@ -586,40 +618,94 @@ async fn parse_get_store_item(
     // };
 }
 
+async fn parse_get_user_data(
+    bin_parameters: &[u8],
+    sender: &mpsc::UnboundedSender<Message>,
+    wallet: &SharedWallet,
+) {
+    let mut pk = [0u8; PUBLIC_KEY_COMPRESSED_SIZE];
+    pk.copy_from_slice(&bin_parameters[..PUBLIC_KEY_COMPRESSED_SIZE]);
+    let pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(&pk, &mut 0));
+
+    let mut user_data_response = [0u8; 17];
+    user_data_response[0] = CMDOpcodes::UserData as u8;
+
+    {
+        let real_wallet = wallet.lock().await;
+        let balance = unwrap_or_ws_error!(sender, real_wallet.get_balance(pk));
+        for i in 0..16 {
+            user_data_response[i + 1] = (balance >> ((15 - i) * 8)) as u8;
+        }
+        drop(real_wallet);
+    }
+
+    if let Err(e) = sender.send(Message::binary(user_data_response)) {
+        println!("Could not send user data: {}", e);
+    };
+}
+
 async fn parse_get_pixel_data(
     bin_parameters: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
     wallet: &SharedWallet,
     canvas: &SharedCanvas,
+    floating_outputs: &HashSet,
 ) {
-    if bin_parameters.len() != 4 {
+    if bin_parameters.len() != 4 + PUBLIC_KEY_COMPRESSED_SIZE {
         ws_error!(
             sender,
             format!(
                 "Expected message len of {} for CMD Opcode {:x} (Get pixel hash) got {}",
-                5,
+                5 + PUBLIC_KEY_COMPRESSED_SIZE,
                 CMDOpcodes::GetPixelData as u8,
                 bin_parameters.len()
             )
         );
     }
-    let mut pixel_hash_response = [0u8; 1 + PIXEL_HASH_SIZE + HASH_SIZE];
-    pixel_hash_response[0] = CMDOpcodes::PixelData as u8;
+
     {
         let real_canvas = canvas.lock().await;
         let x: usize = ((bin_parameters[0] as usize) << 8) + (bin_parameters[1] as usize);
         let y: usize = ((bin_parameters[2] as usize) << 8) + (bin_parameters[3] as usize);
         let pixel = unwrap_or_ws_error!(sender, real_canvas.get_pixel(x, y));
-        pixel_hash_response[1..PIXEL_HASH_SIZE + 1]
-            .copy_from_slice(&pixel.hash(x as u16, y as u16));
         drop(real_canvas);
     }
+    let mut client_pk = [0u8; PUBLIC_KEY_COMPRESSED_SIZE];
+    client_pk.copy_from_slice(&bin_parameters[4..4 + PUBLIC_KEY_COMPRESSED_SIZE]);
+    let client_pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(&client_pk, &mut 0));
+
+    let mut pixel_hash_response = [0u8; 1 + PIXEL_HASH_SIZE + HASH_SIZE];
+    pixel_hash_response[0] = CMDOpcodes::PixelData as u8;
     {
         let real_wallet = wallet.lock().await;
+        let value = unwrap_or_ws_error!(
+            sender,
+            TransactionValue::new_coin_transfer(DUST_PER_CEL, DUST_PER_CEL)
+        );
+        {
+            let real_floating_outputs = floating_outputs.lock().await;
+            let (dust, inputs, used_outputs) = unwrap_or_ws_error!(
+                sender,
+                real_wallet.collect_for_coin_transfer(&value, client_pk, real_floating_outputs)
+            );
+            real_floating_outputs
+                .extend(used_outputs.map(|x| x[1]).collect::<Vec<[u8; HASH_SIZE]>>());
+            drop(real_floating_outputs);
+        }
+        let mut outputs = [TransactionOutput::new(value, client_pk)];
+        if dust > DUST_PER_CEL {
+            outputs.push(TransactionOutput::new(
+                TransactionValue::new_coin_transfer(dust - DUST_PER_CEL, 0),
+                real_wallet.pk,
+            ))
+        }
         let block_hash = real_wallet.get_head_hash();
+        let nft_output = TransactionOutput::new(TransactionValue::new_id_transfer());
+        let transaction = Transaction::new(inputs, outputs);
         pixel_hash_response[PIXEL_HASH_SIZE + 1..].copy_from_slice(&block_hash);
         drop(real_wallet);
     }
+    pixel_hash_response[1..PIXEL_HASH_SIZE + 1].copy_from_slice(&pixel.hash(x as u16, y as u16));
 
     if let Err(e) = sender.send(Message::binary(pixel_hash_response)) {
         println!("Could not send pixel hash: {}", e);
