@@ -21,12 +21,12 @@ impl Pixel {
         Pixel { back_hash, color }
     }
 
-    pub fn new_rand(rng: &mut rand::rngs::ThreadRng) -> Pixel {
-        Pixel {
-            back_hash: [0u8; PIXEL_HASH_SIZE],
-            color: rng.gen_range(0..3),
-        }
-    }
+    // pub fn new_rand(rng: &mut rand::rngs::ThreadRng) -> Pixel {
+    //     Pixel {
+    //         back_hash: [0u8; PIXEL_HASH_SIZE],
+    //         color: rng.gen_range(0..3),
+    //     }
+    // }
 
     pub fn hash(self, x: u16, y: u16) -> [u8; PIXEL_HASH_SIZE] {
         let mut to_digest = [0u8; 33];

@@ -1,13 +1,14 @@
 use std::{
-    collections::HashMap,
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
     convert::Infallible,
     env,
+    fs::read,
     fs::File,
-    fs::{self, read},
     io::prelude::*,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering::Relaxed},
         Arc,
     },
 };
@@ -30,7 +31,7 @@ use crate::canvas::PIXEL_HASH_SIZE;
 use celestium::{
     ec_key_serialization::PUBLIC_KEY_COMPRESSED_SIZE,
     merkle_forest::HASH_SIZE,
-    serialize::Serialize,
+    serialize::{DynamicSized, Serialize},
     transaction::{Transaction, BASE_TRANSACTION_MESSAGE_LEN},
     transaction_output::TransactionOutput,
     transaction_value::TransactionValue,
@@ -42,6 +43,7 @@ mod canvas;
 ////////////////////////////////////////////////// !!! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 type SharedCanvas = Arc<Mutex<canvas::Canvas>>; // !!! IMPORTANT! Always lock SharedCanvas before SharedWallet  !!!
 type SharedWallet = Arc<Mutex<Box<Wallet>>>; ///// !!! IMPORTANT! to await potential dead locks (if using both) !!!
+type SharedFloatingOutputs = Arc<Mutex<Box<HashSet<[u8; HASH_SIZE]>>>>;
 type WSClients = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -316,16 +318,16 @@ fn with_canvas(
 }
 
 fn with_floating_outputs(
-    floating_outputs: HashSet,
-) -> impl Filter<Extract = (HashSet,), Error = Infallible> + Clone {
-    warp::any().map(move || floating_outputs)
+    floating_outputs: SharedFloatingOutputs,
+) -> impl Filter<Extract = (SharedFloatingOutputs,), Error = Infallible> + Clone {
+    warp::any().map(move || floating_outputs.clone())
 }
 
 async fn ws_handler(
     ws: warp::ws::Ws,
     wallet: SharedWallet,
     canvas: SharedCanvas,
-    floating_outputs: HashSet,
+    floating_outputs: SharedFloatingOutputs,
     clients: WSClients,
     database: Database,
 ) -> Result<impl Reply, Rejection> {
@@ -362,7 +364,7 @@ async fn client_connection(
     ws: warp::ws::WebSocket,
     wallet: SharedWallet,
     canvas: SharedCanvas,
-    floating_outputs: HashSet,
+    floating_outputs: SharedFloatingOutputs,
     clients: WSClients,
     database: Database,
 ) {
@@ -370,7 +372,7 @@ async fn client_connection(
     println!("Establishing client connection... {:?}", ws);
     let (mut sender, mut receiver) = ws.split();
 
-    let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
+    let my_id = NEXT_USER_ID.fetch_add(1, Relaxed);
 
     let (tx, rx) = mpsc::unbounded_channel();
     let mut rx = UnboundedReceiverStream::new(rx);
@@ -417,7 +419,7 @@ async fn handle_ws_message(
     my_id: usize,
     wallet: &SharedWallet,
     canvas: &SharedCanvas,
-    floating_outputs: &HashSet,
+    floating_outputs: &SharedFloatingOutputs,
     clients: &WSClients,
     database: &Database,
 ) {
@@ -529,7 +531,8 @@ async fn parse_buy_store_item(
                     sender,
                     TransactionValue::new_coin_transfer(item.store_price_in_dust as u128, 0)
                 ),
-                pk
+                pk,
+                HashSet::new()
             )
         );
         //real_wallet.
@@ -649,7 +652,7 @@ async fn parse_get_pixel_data(
     sender: &mpsc::UnboundedSender<Message>,
     wallet: &SharedWallet,
     canvas: &SharedCanvas,
-    floating_outputs: &HashSet,
+    floating_outputs: &SharedFloatingOutputs,
 ) {
     if bin_parameters.len() != 4 + PUBLIC_KEY_COMPRESSED_SIZE {
         ws_error!(
@@ -663,53 +666,115 @@ async fn parse_get_pixel_data(
         );
     }
 
-    {
-        let real_canvas = canvas.lock().await;
-        let x: usize = ((bin_parameters[0] as usize) << 8) + (bin_parameters[1] as usize);
-        let y: usize = ((bin_parameters[2] as usize) << 8) + (bin_parameters[3] as usize);
-        let pixel = unwrap_or_ws_error!(sender, real_canvas.get_pixel(x, y));
-        drop(real_canvas);
-    }
+    // Parse client parameters
+    let mut i = 0;
+    let x: usize = ((bin_parameters[i] as usize) << 8) + (bin_parameters[i + 1] as usize);
+    i += 2;
+    let y: usize = ((bin_parameters[i] as usize) << 8) + (bin_parameters[i + 1] as usize);
+    i += 2;
     let mut client_pk = [0u8; PUBLIC_KEY_COMPRESSED_SIZE];
-    client_pk.copy_from_slice(&bin_parameters[4..4 + PUBLIC_KEY_COMPRESSED_SIZE]);
+    client_pk.copy_from_slice(&bin_parameters[i..i + PUBLIC_KEY_COMPRESSED_SIZE]);
     let client_pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(&client_pk, &mut 0));
 
-    let mut pixel_hash_response = [0u8; 1 + PIXEL_HASH_SIZE + HASH_SIZE];
-    pixel_hash_response[0] = CMDOpcodes::PixelData as u8;
+    let pixel_hash = {
+        let real_canvas = canvas.lock().await;
+        let pixel = unwrap_or_ws_error!(sender, real_canvas.get_pixel(x, y));
+        drop(real_canvas);
+        pixel.hash(x as u16, y as u16)
+    };
     {
         let real_wallet = wallet.lock().await;
+
+        let pk = unwrap_or_ws_error!(sender, real_wallet.get_pk());
+
+        // Value to transfer to pixel miner
         let value = unwrap_or_ws_error!(
             sender,
             TransactionValue::new_coin_transfer(DUST_PER_CEL, DUST_PER_CEL)
         );
-        {
-            let real_floating_outputs = floating_outputs.lock().await;
+        let (dust, inputs) = {
+            let mut real_floating_outputs = floating_outputs.lock().await;
             let (dust, inputs, used_outputs) = unwrap_or_ws_error!(
                 sender,
-                real_wallet.collect_for_coin_transfer(&value, client_pk, real_floating_outputs)
+                real_wallet.collect_for_coin_transfer(&value, pk, *real_floating_outputs.clone())
             );
-            real_floating_outputs
-                .extend(used_outputs.map(|x| x[1]).collect::<Vec<[u8; HASH_SIZE]>>());
+            for output in used_outputs {
+                real_floating_outputs.insert(output.1);
+            }
             drop(real_floating_outputs);
+            (dust, inputs)
+        };
+
+        // Add output transferring "value" to pixel miner
+        let mut outputs = vec![TransactionOutput::new(value, client_pk)];
+
+        match dust.cmp(&(DUST_PER_CEL * 2)) {
+            Ordering::Greater => {
+                // Output transferring unused dust (if there is unused dust)
+                println!(
+                    "WARNING: Got more dust than needed ({} > {}), this shouldn't happen too much (ideally only once)",
+                    dust,
+                    DUST_PER_CEL * 2
+                );
+                outputs.push(TransactionOutput::new(
+                    unwrap_or_ws_error!(
+                        sender,
+                        TransactionValue::new_coin_transfer(dust - DUST_PER_CEL * 2, 0)
+                    ),
+                    pk,
+                ));
+            }
+            Ordering::Less => {
+                ws_error!(
+                    sender,
+                    format!(
+                        "Could not find enough dust to pay you, only found {} expected at least {}",
+                        dust,
+                        DUST_PER_CEL * 2
+                    )
+                );
+            }
+            Ordering::Equal => (),
         }
-        let mut outputs = [TransactionOutput::new(value, client_pk)];
-        if dust > DUST_PER_CEL {
-            outputs.push(TransactionOutput::new(
-                TransactionValue::new_coin_transfer(dust - DUST_PER_CEL, 0),
-                real_wallet.pk,
-            ))
-        }
-        let block_hash = real_wallet.get_head_hash();
-        let nft_output = TransactionOutput::new(TransactionValue::new_id_transfer());
-        let transaction = Transaction::new(inputs, outputs);
-        pixel_hash_response[PIXEL_HASH_SIZE + 1..].copy_from_slice(&block_hash);
+
+        let mut transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
+        let sk = unwrap_or_ws_error!(sender, real_wallet.get_sk());
+        unwrap_or_ws_error!(sender, transaction.sign(sk, 0));
+        unwrap_or_ws_error!(sender, transaction.sign(sk, 1));
+
+        // Create response vector
+        let mut pixel_hash_response =
+            vec![0u8; 1 + PIXEL_HASH_SIZE + HASH_SIZE + transaction.serialized_len()];
+
+        // Create response pixel data
+        i = 0;
+        pixel_hash_response[i] = CMDOpcodes::PixelData as u8;
+        i += 1;
+
+        // Add pixel hash to response
+        pixel_hash_response[i..i + PIXEL_HASH_SIZE].copy_from_slice(&pixel_hash);
+        i += PIXEL_HASH_SIZE;
+
+        // Add block hash to response
+        pixel_hash_response[i..i + HASH_SIZE].copy_from_slice(&real_wallet.get_head_hash());
+        i += HASH_SIZE;
+
+        // Add transaction to response
+        unwrap_or_ws_error!(
+            sender,
+            transaction.serialize_into(
+                &mut pixel_hash_response[i..i + transaction.serialized_len()],
+                &mut i,
+            )
+        );
+
+        // Send response
+        if let Err(e) = sender.send(Message::binary(pixel_hash_response)) {
+            println!("Could not send pixel hash: {}", e);
+        };
+
         drop(real_wallet);
     }
-    pixel_hash_response[1..PIXEL_HASH_SIZE + 1].copy_from_slice(&pixel.hash(x as u16, y as u16));
-
-    if let Err(e) = sender.send(Message::binary(pixel_hash_response)) {
-        println!("Could not send pixel hash: {}", e);
-    };
 }
 
 async fn parse_transaction(
