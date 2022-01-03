@@ -1,6 +1,5 @@
 use celestium::transaction::BASE_TRANSACTION_MESSAGE_LEN;
 /* Maniuplating a 1000x1000 pixel canvas */
-use rand::Rng;
 use sha3::{Digest, Sha3_224};
 
 pub(crate) const PIXEL_HASH_SIZE: usize = 28;

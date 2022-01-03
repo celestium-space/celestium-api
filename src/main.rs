@@ -43,7 +43,7 @@ mod canvas;
 ////////////////////////////////////////////////// !!! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 type SharedCanvas = Arc<Mutex<canvas::Canvas>>; // !!! IMPORTANT! Always lock SharedCanvas before SharedWallet  !!!
 type SharedWallet = Arc<Mutex<Box<Wallet>>>; ///// !!! IMPORTANT! to await potential dead locks (if using both) !!!
-type SharedFloatingOutputs = Arc<Mutex<Box<HashSet<[u8; HASH_SIZE]>>>>;
+type SharedFloatingOutputs = Arc<Mutex<Box<HashSet<([u8; HASH_SIZE], usize)>>>>;
 type WSClients = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -450,6 +450,7 @@ async fn handle_ws_message(
                 sender,
                 wallet,
                 canvas,
+                floating_outputs,
                 clients,
                 database,
             )
@@ -524,7 +525,7 @@ async fn parse_buy_store_item(
 
     {
         let real_wallet = wallet.lock().await;
-        let (dust, inputs, _) = unwrap_or_ws_error!(
+        let (dust, inputs) = unwrap_or_ws_error!(
             sender,
             real_wallet.collect_for_coin_transfer(
                 &unwrap_or_ws_error!(
@@ -688,18 +689,19 @@ async fn parse_get_pixel_data(
         let pk = unwrap_or_ws_error!(sender, real_wallet.get_pk());
 
         // Value to transfer to pixel miner
+
         let value = unwrap_or_ws_error!(
             sender,
             TransactionValue::new_coin_transfer(DUST_PER_CEL, DUST_PER_CEL)
         );
         let (dust, inputs) = {
             let mut real_floating_outputs = floating_outputs.lock().await;
-            let (dust, inputs, used_outputs) = unwrap_or_ws_error!(
+            let (dust, inputs) = unwrap_or_ws_error!(
                 sender,
                 real_wallet.collect_for_coin_transfer(&value, pk, *real_floating_outputs.clone())
             );
-            for output in used_outputs {
-                real_floating_outputs.insert(output.1);
+            for input in &inputs {
+                real_floating_outputs.insert((input.transaction_hash, input.index.get_value()));
             }
             drop(real_floating_outputs);
             (dust, inputs)
@@ -738,9 +740,11 @@ async fn parse_get_pixel_data(
         }
 
         let mut transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
+
         let sk = unwrap_or_ws_error!(sender, real_wallet.get_sk());
-        unwrap_or_ws_error!(sender, transaction.sign(sk, 0));
-        unwrap_or_ws_error!(sender, transaction.sign(sk, 1));
+        for i in 0..transaction.get_inputs().len() {
+            unwrap_or_ws_error!(sender, transaction.sign(sk, i));
+        }
 
         // Create response vector
         let mut pixel_hash_response =
@@ -760,12 +764,10 @@ async fn parse_get_pixel_data(
         i += HASH_SIZE;
 
         // Add transaction to response
+        let pre_i = i;
         unwrap_or_ws_error!(
             sender,
-            transaction.serialize_into(
-                &mut pixel_hash_response[i..i + transaction.serialized_len()],
-                &mut i,
-            )
+            transaction.serialize_into(&mut pixel_hash_response, &mut i,)
         );
 
         // Send response
@@ -782,16 +784,27 @@ async fn parse_transaction(
     sender: &mpsc::UnboundedSender<Message>,
     wallet: &SharedWallet,
     canvas: &SharedCanvas,
+    floating_outputs: &SharedFloatingOutputs,
     clients: &WSClients,
     database: &Database,
 ) {
-    let transaction = unwrap_or_ws_error!(
+    let mut i = 0;
+    let pixel_transaction = unwrap_or_ws_error!(
         sender,
-        Transaction::from_serialized(bin_transaction, &mut 0)
+        Transaction::from_serialized(bin_transaction, &mut i)
+    );
+
+    let value_transaction = unwrap_or_ws_error!(
+        sender,
+        Transaction::from_serialized(bin_transaction, &mut i)
     );
 
     let mut real_wallet = wallet.lock().await;
-    if let Err(e) = real_wallet.add_off_chain_transaction(*transaction.clone()) {
+    let pk = unwrap_or_ws_error!(sender, real_wallet.get_pk());
+    if let Err(e) = real_wallet.add_off_chain_transaction(*pixel_transaction.clone(), vec![]) {
+        ws_error!(sender, e);
+    }
+    if let Err(e) = real_wallet.add_off_chain_transaction(*value_transaction.clone(), vec![pk]) {
         ws_error!(sender, e);
     }
 
@@ -800,8 +813,14 @@ async fn parse_transaction(
     }
     drop(real_wallet);
 
+    let mut real_floating_outputs = floating_outputs.lock().await;
+    for input in value_transaction.get_inputs() {
+        real_floating_outputs.remove(&(input.transaction_hash, input.index.get_value()));
+    }
+    drop(real_floating_outputs);
+
     let base_transaction_message =
-        unwrap_or_ws_error!(sender, transaction.get_base_transaction_message())
+        unwrap_or_ws_error!(sender, pixel_transaction.get_base_transaction_message())
             as [u8; BASE_TRANSACTION_MESSAGE_LEN];
 
     let mut real_canvas = canvas.lock().await;
