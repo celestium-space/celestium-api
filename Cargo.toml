@@ -8,22 +8,29 @@ edition = "2018"
 
 [dependencies]
 tokio = { version= "1", features = ["full"] }
-tokio-stream = "0.1.6"
-warp = "0.3.1"
+tokio-stream = "0.1"
+warp = "0.3"
 futures = { version = "0.3", default-features=false }
-cached = "0.23.0"
-rand = "0.8.4"
+cached = "0.23"
+rand = "0.8"
 num-traits = "0.2"
 num-derive = "0.2"
-mongodb = "2.0.0"
 serde = { version = "1.0", features = ["derive"] }
 sha3 = "0.9"
 secp256k1 = "0.19"
-serde_json = "1.0.59"
+serde_json = "1.0"
+hex = "0.4"
+reqwest = "0.11"
+rayon = "1.5"
+
+[dependencies.mongodb]
+version="2.0"
+default-features = false
+features = ["sync"]
 
 [dependencies.celestium]
 path = "./celestium-lib"
-version = "0.1.0"
+version = "0.1"
 
 [features]
 mining-ez-mode = ["celestium/mining-ez-mode"]
