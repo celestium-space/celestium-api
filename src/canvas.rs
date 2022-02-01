@@ -63,11 +63,13 @@ impl Canvas {
 
     pub fn serialize_colors(&self) -> Vec<u8> {
         // serialize entire canvas into an array of only colors
-        self.canvas
-            .iter()
-            .map(|column| column.iter().map(|p| p.color))
-            .flatten()
-            .collect()
+        let mut res = vec![0u8; 1_000_000];
+        for (x, col) in self.canvas.iter().enumerate() {
+            for (y, p) in col.iter().enumerate() {
+                res[x + y * 1000] = p.color;
+            }
+        }
+        res
     }
 
     pub fn get_pixel(&self, x: usize, y: usize) -> Result<Pixel, String> {
