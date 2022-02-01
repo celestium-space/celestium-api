@@ -11,7 +11,7 @@ pub type Color = u8;
 
 #[derive(Clone)]
 pub struct Pixel {
-    back_hash: [u8; PIXEL_HASH_SIZE],
+    pub back_hash: [u8; PIXEL_HASH_SIZE],
     pub color: Color,
 }
 
@@ -27,7 +27,7 @@ impl Pixel {
     //     }
     // }
 
-    pub fn hash(self, x: u16, y: u16) -> [u8; PIXEL_HASH_SIZE] {
+    pub fn hash(&self, x: u16, y: u16) -> [u8; PIXEL_HASH_SIZE] {
         let mut to_digest = [0u8; 33];
         to_digest[..PIXEL_HASH_SIZE].copy_from_slice(&self.back_hash);
         to_digest[PIXEL_HASH_SIZE] = (x >> 8) as u8;

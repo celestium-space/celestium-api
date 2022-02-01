@@ -34,7 +34,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::{filters::ws::Message, Filter, Rejection, Reply};
 
 // here
-use crate::canvas::PIXEL_HASH_SIZE;
+use crate::canvas::{Pixel, PIXEL_HASH_SIZE};
 use celestium::{
     ec_key_serialization::PUBLIC_KEY_COMPRESSED_SIZE,
     serialize::{DynamicSized, Serialize},
@@ -261,17 +261,37 @@ async fn main() {
 
     // initialize empty canvas
     print!("Initializing canvas...");
-    let shared_canvas = canvas::Canvas::new_test();
+    let mut shared_canvas = canvas::Canvas::new_test();
     let real_wallet = shared_wallet.lock().await;
-    for (hash, transaction) in real_wallet.off_chain_transactions.clone() {
+    let mut to_throw_away: HashSet<[u8; PIXEL_HASH_SIZE]> = HashSet::new();
+    let mut candidates: HashMap<[u8; PIXEL_HASH_SIZE], (u16, u16, Pixel)> = HashMap::new();
+    for (_, transaction) in real_wallet.off_chain_transactions.clone() {
         if transaction.is_id_base_transaction() {
-            let (x, y, transaction_pixel) =
+            let (x, y, pixel) =
                 canvas::Canvas::parse_pixel(transaction.get_base_transaction_message().unwrap())
                     .unwrap();
-            let canvas_pixel = shared_canvas.get_pixel(x, y);
-            //if canvas_pixel.hash
+
+            to_throw_away.insert(pixel.back_hash);
+            if let Some((x, y, p)) = candidates.remove(&pixel.back_hash) {
+                to_throw_away.insert(pixel.back_hash);
+            }
+            let hash: [u8; PIXEL_HASH_SIZE] = pixel.hash(x as u16, y as u16);
+            if !to_throw_away.contains(&hash) {
+                candidates.insert(hash, (x as u16, y as u16, pixel));
+            }
         }
     }
+    println!("Found {} initial candidates", candidates.len());
+    let mut actual_candidates = 0usize;
+    for (x, y, p) in candidates.values() {
+        if to_throw_away.contains(&p.back_hash) || p.back_hash.is_empty() {
+            actual_candidates += 1;
+            shared_canvas
+                .set_pixel((*x).into(), (*y).into(), p.clone())
+                .unwrap();
+        }
+    }
+    println!("Found {} acutal candidates", actual_candidates);
     drop(real_wallet);
     let shared_canvas = Arc::new(Mutex::new(shared_canvas));
     println!(" Done!");
@@ -450,6 +470,7 @@ async fn client_connection(
     println!("Test3");
     // Save the sender in our list of connected users.
     clients.write().await.insert(my_id, tx);
+    println!("TEST4");
 
     println!("Current clients: {}", clients.read().await.len());
 
