@@ -59,91 +59,91 @@ type WSClients = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct StoreItem {
     _id: ObjectId,
-    a: String,
-    A1: String,
-    A2: String,
-    A3: String,
-    ad: String,
-    albedo: Option<f64>,
-    BV: String,
-    class: String,
-    closeness: Option<i32>,
-    condition_code: String,
-    data_arc: f64,
-    diameter: Option<f64>,
-    diameter_sigma: Option<f64>,
-    DT: String,
-    dv: f64,
-    e: f64,
-    epoch: f64,
-    epoch_cal: f64,
-    epoch_mjd: f64,
-    equinox: String,
-    est_diameter: f64,
-    extent: String,
-    first_obs: String,
+    // a: String,
+    // A1: String,
+    // A2: String,
+    // A3: String,
+    // ad: String,
+    // albedo: Option<f64>,
+    // BV: String,
+    // class: String,
+    // closeness: Option<i32>,
+    // condition_code: String,
+    // data_arc: f64,
+    // diameter: Option<f64>,
+    // diameter_sigma: Option<f64>,
+    // DT: String,
+    // dv: f64,
+    // e: f64,
+    // epoch: f64,
+    // epoch_cal: f64,
+    // epoch_mjd: f64,
+    // equinox: String,
+    // est_diameter: f64,
+    // extent: String,
+    // first_obs: String,
     full_name: String,
-    G: String,
-    GM: String,
-    H: String,
-    H_sigma: Option<f64>,
-    i: f64,
-    id: String,
-    inexact: bool,
-    IR: String,
-    K1: String,
-    K2: String,
-    last_obs: String,
-    M1: String,
-    M2: String,
-    ma: String,
-    moid: String,
-    moid_jup: String,
-    moid_ld: String,
-    n: String,
-    n_del_obs_used: String,
-    n_dop_obs_used: String,
-    n_obs_used: f64,
-    name: String,
-    neo: String,
-    om: f64,
-    orbit_id: String,
-    PC: String,
-    pdes: String,
-    per: String,
-    per_y: String,
-    pha: String,
-    prefix: String,
-    price: Option<i32>,
-    producer: String,
-    profit: Option<i32>,
-    prov_des: String,
-    q: f64,
-    rms: String,
-    rot_per: Option<f64>,
-    saved: f64,
-    score: f64,
-    sigma_a: String,
-    sigma_ad: String,
-    sigma_e: String,
-    sigma_i: String,
-    sigma_ma: String,
-    sigma_n: String,
-    sigma_om: String,
-    sigma_per: String,
-    sigma_q: String,
-    sigma_tp: String,
-    sigma_w: String,
-    spec: String,
-    spec_B: String,
-    spec_T: String,
-    spkid: f64,
-    t_jup: String,
-    tp: f64,
-    tp_cal: f64,
-    two_body: String,
-    UB: String,
-    w: f64,
+    // G: String,
+    // GM: String,
+    // H: String,
+    // H_sigma: Option<f64>,
+    // i: f64,
+    // id: String,
+    // inexact: bool,
+    // IR: String,
+    // K1: String,
+    // K2: String,
+    // last_obs: String,
+    // M1: String,
+    // M2: String,
+    // ma: String,
+    // moid: String,
+    // moid_jup: String,
+    // moid_ld: String,
+    // n: String,
+    // n_del_obs_used: String,
+    // n_dop_obs_used: String,
+    // n_obs_used: f64,
+    // name: String,
+    // neo: String,
+    // om: f64,
+    // orbit_id: String,
+    // PC: String,
+    // pdes: String,
+    // per: String,
+    // per_y: String,
+    // pha: String,
+    // prefix: String,
+    price: Option<f64>,
+    // producer: String,
+    profit: Option<f64>,
+    // prov_des: String,
+    // q: f64,
+    // rms: String,
+    // rot_per: Option<f64>,
+    // saved: f64,
+    // score: f64,
+    // sigma_a: String,
+    // sigma_ad: String,
+    // sigma_e: String,
+    // sigma_i: String,
+    // sigma_ma: String,
+    // sigma_n: String,
+    // sigma_om: String,
+    // sigma_per: String,
+    // sigma_q: String,
+    // sigma_tp: String,
+    // sigma_w: String,
+    // spec: String,
+    // spec_B: String,
+    // spec_T: String,
+    // spkid: f64,
+    // t_jup: String,
+    // tp: f64,
+    // tp_cal: f64,
+    // two_body: String,
+    // UB: String,
+    // w: f64,
     store_value_in_dust: String,
 }
 
@@ -153,13 +153,18 @@ struct GetStoreItemData {
     store_value_in_dust: String,
 }
 
+#[derive(SerdeSerialize, Deserialize, Debug)]
+struct UserData {
+    balance: String,
+    owned_store_items: Vec<StoreItem>,
+}
+
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 static DUST_PER_CEL: u128 = 10000000000000000000000000000000;
 static DEFAULT_MONGODB_STORE_COLLECTION_NAME: &str = "asteroids";
-static DEFAULT_MONGODB_BOUGHT_COLLECTION_NAME: &str = "bought";
 
 #[repr(u8)]
-#[derive(FromPrimitive)]
+#[derive(FromPrimitive, Debug)]
 enum CMDOpcodes {
     GetEntireImage = 0x01,
     EntireImage = 0x02,
@@ -398,6 +403,7 @@ async fn ws_handler(
     // weird boilerplate because I don't know why
     // this async function seems to just pass stuff on to another async function
     // but I don't know how to inline it 🤷
+    println!("ws_handler");
     Ok(ws.on_upgrade(move |socket| {
         client_connection(socket, wallet, canvas, floating_outputs, clients, database)
     }))
@@ -435,11 +441,17 @@ async fn client_connection(
     // keeps a client connection open, pass along incoming messages
     println!("Establishing client connection... {:?}", ws);
     let (mut sender, mut receiver) = ws.split();
-
+    println!("Test0");
     let my_id = NEXT_USER_ID.fetch_add(1, Relaxed);
-
+    println!("Test1");
     let (tx, rx) = mpsc::unbounded_channel();
+    println!("Test2");
     let mut rx = UnboundedReceiverStream::new(rx);
+    println!("Test3");
+    // Save the sender in our list of connected users.
+    clients.write().await.insert(my_id, tx);
+
+    println!("Current clients: {}", clients.read().await.len());
 
     tokio::task::spawn(async move {
         while let Some(message) = rx.next().await {
@@ -451,9 +463,6 @@ async fn client_connection(
                 .await;
         }
     });
-
-    // Save the sender in our list of connected users.
-    clients.write().await.insert(my_id, tx);
 
     while let Some(body) = receiver.next().await {
         let message = match body {
@@ -497,7 +506,10 @@ async fn handle_ws_message(
         ws_error!(sender, "Expected binary WS message.".to_string());
     }
 
-    println!("Got binary message");
+    println!(
+        "Got binary message: {:?}",
+        CMDOpcodes::from_u8(message.as_bytes()[0])
+    );
 
     let binary_message = message.as_bytes();
     match FromPrimitive::from_u8(binary_message[0]) {
@@ -539,7 +551,7 @@ async fn handle_ws_message(
             parse_get_store_item(&binary_message[1..], sender, wallet, database).await
         }
         Some(CMDOpcodes::GetUserData) => {
-            parse_get_user_data(&binary_message[1..], sender, wallet).await
+            parse_get_user_data(&binary_message[1..], sender, wallet, database).await
         }
         _ => {
             ws_error!(
@@ -670,16 +682,14 @@ async fn parse_buy_store_item(
                 unwrap_or_ws_error!(sender, real_wallet.add_off_chain_transaction(t));
 
                 unwrap_or_ws_error!(sender, save_wallet(&real_wallet));
-                let bought_collection_name: String = env::var("MONGODB_BOUGHT_COLLECTION_NAME")
-                    .unwrap_or(DEFAULT_MONGODB_BOUGHT_COLLECTION_NAME.to_string());
-                let bought_collection = database.collection::<StoreItem>(&bought_collection_name);
-                bought_collection.insert_one(&item, None);
-                // bought_collection.update_one(
-                //     doc! {"_id": item._id},
-                //     doc! {"id_hash": id_hash.to_vec()},
-                //     None,
-                // );
-                store_collection.delete_one(doc! {"_id": item._id}, None);
+                unwrap_or_ws_error!(
+                    sender,
+                    store_collection.update_one(
+                        doc! {"_id": item._id},
+                        doc! {"$set": {"id_hash": hex::encode(id_hash), "state": "bought"}},
+                        None,
+                    )
+                );
 
                 let n = real_wallet.lookup_nft(id_hash).unwrap();
                 drop(real_wallet);
@@ -722,7 +732,7 @@ async fn parse_buy_store_item(
                     0
                 )
             ),
-            their_pk,
+            unwrap_or_ws_error!(sender, real_wallet.get_pk()),
         )];
         let change = dust - store_value_in_dust;
         if change > 0 {
@@ -870,6 +880,7 @@ async fn parse_get_user_data(
     bin_parameters: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
     wallet: &SharedWallet,
+    database: &Database,
 ) {
     let mut pk = [0u8; PUBLIC_KEY_COMPRESSED_SIZE];
     pk.copy_from_slice(&bin_parameters[..PUBLIC_KEY_COMPRESSED_SIZE]);
@@ -877,23 +888,40 @@ async fn parse_get_user_data(
 
     println!("Got user data request for: [0x{}]", pk);
 
-    let mut user_data_response = [0u8; 17];
-    user_data_response[0] = CMDOpcodes::UserData as u8;
-
-    {
+    let user_data = {
         let real_wallet = wallet.lock().await;
+
         let (balance, owned_ids) = unwrap_or_ws_error!(sender, real_wallet.get_balance(pk));
-        for i in 0..16 {
-            user_data_response[i + 1] = (balance >> ((15 - i) * 8)) as u8;
-        }
+
+        let mut user_data = UserData {
+            balance: balance.to_string(),
+            owned_store_items: Vec::new(),
+        };
+
+        let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
+            .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
+        let store_collection = database.collection::<StoreItem>(&store_collection_name);
+
         for owned_id in owned_ids {
-            println!("Owned id: {}", owned_id);
+            if let Ok(Some(item)) = store_collection.find_one(
+                doc! {"id_hash": hex::encode(unwrap_or_ws_error!(sender, owned_id.get_id()))},
+                None,
+            ) {
+                user_data.owned_store_items.push(item);
+            }
         }
 
         drop(real_wallet);
-    }
+        user_data
+    };
 
-    if let Err(e) = sender.send(Message::binary(user_data_response)) {
+    let json = unwrap_or_ws_error!(sender, serde_json::to_string(&user_data));
+    let bin_json = json.as_bytes();
+    let mut buffer = vec![0; (bin_json.len() + 1) as usize];
+    buffer[0] = CMDOpcodes::UserData as u8;
+    buffer[1..].copy_from_slice(bin_json);
+
+    if let Err(e) = sender.send(Message::binary(buffer)) {
         println!("Could not send user data: {}", e);
     };
 }
@@ -1060,14 +1088,11 @@ async fn parse_transaction(
         let mut real_wallet = wallet.lock().await;
         let our_pk = unwrap_or_ws_error!(sender, real_wallet.get_pk());
         let (pre_balance, owned_ids) = unwrap_or_ws_error!(sender, real_wallet.get_balance(our_pk));
-        println!("Pre-balance: {} | {}", pre_balance, owned_ids.len());
-        println!("Total value: {}", transaction.get_total_output_value());
         if let Err(e) = real_wallet.add_off_chain_transaction(*transaction.clone()) {
             ws_error!(sender, e);
         }
         let (post_balance, owned_ids) =
             unwrap_or_ws_error!(sender, real_wallet.get_balance(our_pk));
-        println!("Post-balance: {} | {}", post_balance, owned_ids.len());
 
         if let Err(e) = save_wallet(&real_wallet) {
             ws_error!(sender, e);
