@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
-        Arc,
+        Arc, Mutex as STDMutex,
     },
     time::Instant,
 };
@@ -53,7 +53,8 @@ mod canvas;
 type SharedCanvas = Arc<Mutex<canvas::Canvas>>; // !!! IMPORTANT! Always lock SharedCanvas before SharedWallet  !!!
 type SharedWallet = Arc<Mutex<Box<Wallet>>>; ///// !!! IMPORTANT! to await potential dead locks (if using both) !!!
 type SharedFloatingOutputs = Arc<Mutex<Box<HashSet<(TransactionHash, usize)>>>>;
-type WSClients = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
+type WSClients = HashMap<usize, mpsc::UnboundedSender<Message>>;
+type SharedClientsMutex = Arc<STDMutex<i32>>;
 
 #[allow(non_snake_case)]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -281,6 +282,7 @@ async fn main() {
             }
         }
     }
+    drop(real_wallet);
     println!("Found {} initial candidates", candidates.len());
     let mut actual_candidates = 0usize;
     for (x, y, p) in candidates.values() {
@@ -292,7 +294,6 @@ async fn main() {
         }
     }
     println!("Found {} acutal candidates", actual_candidates);
-    drop(real_wallet);
     let shared_canvas = Arc::new(Mutex::new(shared_canvas));
     println!(" Done!");
 
@@ -304,14 +305,18 @@ async fn main() {
 
     let floating_outputs = Arc::new(Mutex::new(Box::new(HashSet::new())));
 
+    let clients_mutex: Arc<STDMutex<i32>> = Arc::new(STDMutex::new(0));
+
     // configure ws route
     let ws_route = warp::path::end()
         .and(warp::ws())
         .and(with_wallet(shared_wallet))
         .and(with_canvas(shared_canvas))
         .and(with_floating_outputs(floating_outputs))
+        .and(with_clients_mutex(clients_mutex))
         .and(ws_clients)
         .and(database)
+        //.and(clients_mutex)
         .and_then(ws_handler)
         .with(warp::cors().allow_any_origin());
 
@@ -380,6 +385,7 @@ fn save_wallet(wallet: &Wallet) -> Result<(), String> {
         "off_chain_transactions",
         wallet_bin.off_chain_transactions_bin,
     )??;
+    println!("Wallet written to disk");
     Ok(())
 }
 
@@ -412,11 +418,18 @@ fn with_floating_outputs(
     warp::any().map(move || floating_outputs.clone())
 }
 
+fn with_clients_mutex(
+    clients_mutex: SharedClientsMutex,
+) -> impl Filter<Extract = (SharedClientsMutex,), Error = Infallible> + Clone {
+    warp::any().map(move || clients_mutex.clone())
+}
+
 async fn ws_handler(
     ws: warp::ws::Ws,
     wallet: SharedWallet,
     canvas: SharedCanvas,
     floating_outputs: SharedFloatingOutputs,
+    clients_mutex: SharedClientsMutex,
     clients: WSClients,
     database: Database,
 ) -> Result<impl Reply, Rejection> {
@@ -425,7 +438,15 @@ async fn ws_handler(
     // but I don't know how to inline it 🤷
     println!("ws_handler");
     Ok(ws.on_upgrade(move |socket| {
-        client_connection(socket, wallet, canvas, floating_outputs, clients, database)
+        client_connection(
+            socket,
+            wallet,
+            canvas,
+            floating_outputs,
+            clients_mutex,
+            clients,
+            database,
+        )
     }))
 }
 
@@ -434,7 +455,13 @@ macro_rules! ws_error {
     // and exit function early
     ($sender: expr, $errmsg: expr) => {
         println!("{}", $errmsg);
-        $sender.send(Message::text($errmsg.to_string())).unwrap();
+        if !$sender.is_closed() {
+            $sender.send(Message::text($errmsg.to_string())).unwrap();
+        } else {
+            println!(
+                "WARNING: A connection was closed unexpectedly before being able to send an error"
+            );
+        }
         return;
     };
 }
@@ -455,24 +482,25 @@ async fn client_connection(
     wallet: SharedWallet,
     canvas: SharedCanvas,
     floating_outputs: SharedFloatingOutputs,
-    clients: WSClients,
+    clients_mutex: SharedClientsMutex,
+    mut clients: WSClients,
     database: Database,
 ) {
     // keeps a client connection open, pass along incoming messages
     println!("Establishing client connection... {:?}", ws);
     let (mut sender, mut receiver) = ws.split();
-    println!("Test0");
     let my_id = NEXT_USER_ID.fetch_add(1, Relaxed);
-    println!("Test1");
     let (tx, rx) = mpsc::unbounded_channel();
-    println!("Test2");
     let mut rx = UnboundedReceiverStream::new(rx);
+
     println!("Test3");
     // Save the sender in our list of connected users.
-    clients.write().await.insert(my_id, tx);
-    println!("TEST4");
 
-    println!("Current clients: {}", clients.read().await.len());
+    {
+        let mutex = clients_mutex.lock().unwrap();
+        clients.insert(my_id, tx);
+    }
+    println!("Current clients: {}", clients.len());
 
     tokio::task::spawn(async move {
         while let Some(message) = rx.next().await {
@@ -505,7 +533,8 @@ async fn client_connection(
         .await;
     }
 
-    clients.write().await.remove(&my_id);
+    clients.remove(&my_id);
+    println!("Current clients: {}", clients.len());
 }
 
 async fn handle_ws_message(
@@ -520,8 +549,7 @@ async fn handle_ws_message(
     // this is the function that actually receives a message
     // validate it, add it to the blockchain, then exit.
 
-    let real_clients = clients.read().await;
-    let sender = real_clients.get(&my_id).unwrap();
+    let sender = clients.get(&my_id).unwrap();
 
     if !message.is_binary() {
         ws_error!(sender, "Expected binary WS message.".to_string());
@@ -539,8 +567,12 @@ async fn handle_ws_message(
             let mut entire_image = real_canvas.serialize_colors();
             entire_image.insert(0, CMDOpcodes::EntireImage as u8);
             drop(real_canvas);
-            if let Err(e) = sender.send(Message::binary(entire_image)) {
-                ws_error!(sender, format!("Error sending canvas: {}", e));
+            if !sender.is_closed() {
+                if let Err(e) = sender.send(Message::binary(entire_image)) {
+                    ws_error!(sender, format!("Error sending canvas: {}", e));
+                }
+            } else {
+                println!("WARNING: A connection was closed unexpectedly before being able to send the canvas");
             }
         }
         Some(CMDOpcodes::MinedTransaction) => {
@@ -702,7 +734,6 @@ async fn parse_buy_store_item(
                 let mut real_wallet = wallet.lock().await;
                 unwrap_or_ws_error!(sender, real_wallet.add_off_chain_transaction(t));
 
-                unwrap_or_ws_error!(sender, save_wallet(&real_wallet));
                 unwrap_or_ws_error!(
                     sender,
                     store_collection.update_one(
@@ -713,6 +744,7 @@ async fn parse_buy_store_item(
                 );
 
                 let n = real_wallet.lookup_nft(id_hash).unwrap();
+                unwrap_or_ws_error!(sender, save_wallet(&real_wallet));
                 drop(real_wallet);
                 n
             }
@@ -733,6 +765,8 @@ async fn parse_buy_store_item(
                 HashSet::new()
             )
         );
+        drop(real_wallet);
+
         if dust < store_value_in_dust {
             ws_error!(
                 sender,
@@ -745,6 +779,7 @@ async fn parse_buy_store_item(
             );
         }
 
+        let real_wallet = wallet.lock().await;
         let mut outputs = vec![TransactionOutput::new(
             unwrap_or_ws_error!(
                 sender,
@@ -755,6 +790,8 @@ async fn parse_buy_store_item(
             ),
             unwrap_or_ws_error!(sender, real_wallet.get_pk()),
         )];
+        drop(real_wallet);
+
         let change = dust - store_value_in_dust;
         if change > 0 {
             outputs.push(TransactionOutput::new(
@@ -776,6 +813,7 @@ async fn parse_buy_store_item(
 
         let mut transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
 
+        let real_wallet = wallet.lock().await;
         unwrap_or_ws_error!(
             sender,
             transaction.sign(
@@ -783,7 +821,6 @@ async fn parse_buy_store_item(
                 transaction.count_inputs() - 1
             )
         );
-
         drop(real_wallet);
 
         transaction
@@ -796,9 +833,14 @@ async fn parse_buy_store_item(
         sender,
         transaction.serialize_into(&mut response_data, &mut 1)
     );
-
-    if let Err(e) = sender.send(Message::binary(response_data)) {
-        println!("Could not send store item: {}", e);
+    if !sender.is_closed() {
+        if let Err(e) = sender.send(Message::binary(response_data)) {
+            println!("Could not send store item: {}", e);
+        }
+    } else {
+        println!(
+            "WARNING: A connection was closed unexpectedly before being able to send store item"
+        );
     }
 }
 
@@ -851,50 +893,15 @@ async fn parse_get_store_item(
     buffer[0] = CMDOpcodes::StoreItem as u8;
     buffer[1..].copy_from_slice(bin_json);
 
-    if let Err(e) = sender.send(Message::binary(buffer)) {
-        println!("Could not send store item: {}", e);
+    if !sender.is_closed() {
+        if let Err(e) = sender.send(Message::binary(buffer)) {
+            println!("Could not send store item: {}", e);
+        }
+    } else {
+        println!(
+            "WARNING: A connection was closed unexpectedly before being able to send store item"
+        );
     }
-    // // check length of params
-    // if bin_parameters.len() != 16 {
-    //     ws_error!(
-    //         sender,
-    //         format!(
-    //             "Expected message len of 16 for CMD opcode {:x} (GetStoreItems)",
-    //             CMDOpcodes::GetStoreItems as u8,
-    //         )
-    //     );
-    // }
-
-    // // parse params
-    // let from: u32 = ((bin_parameters[0] as u32) << 24) + ((bin_parameters[1] as u32) << 16) + ((bin_parameters[2] as u32) << 8) + ((bin_parameters[3] as u32));
-    // let to: u32 = ((bin_parameters[4] as u32) << 24) + ((bin_parameters[5] as u32) << 16) + ((bin_parameters[6] as u32) << 8) + ((bin_parameters[7] as u32));
-
-    // // dance with mongo
-    // let store_collection = database.collection::<StoreItem>("store");
-    // let filter = doc! {"range": [from, to]};
-    // let mongo_result = store_collection.find(filter, None).await;
-
-    // // parse mongo result
-    // let mut cursor = unwrap_or_ws_error!(
-    //     sender,
-    //     mongo_result.map_err(|_| "Failed querying mongodb for asteroids.")
-    // );
-
-    // // parse to json
-    // let mut json_results: Vec<String> = vec![];
-    // while let Some(Ok(asteroid)) = cursor.next().await {
-    //   match serde_json::to_string(&asteroid) {
-    //       Ok(a) => json_results.push(a),
-    //       Err(_) => { ws_error!(sender, "Failed parsing an asteroid from Mongo."); }
-    //   }
-    // }
-
-    // // put a bow on it
-    // let json_array: String = "[".to_string() + &json_results.join(",") + "]";
-    // let response_bytes: &[u8] = &[&[CMDOpcodes::StoreItems as u8], json_array.as_bytes()].concat();
-    // if let Err(e) = sender.send(Message::binary(response_bytes)) {
-    //     println!("Could not send StoreItems: {}", e);
-    // };
 }
 
 async fn parse_get_user_data(
@@ -911,8 +918,10 @@ async fn parse_get_user_data(
 
     let user_data = {
         let real_wallet = wallet.lock().await;
-
         let (balance, owned_ids) = unwrap_or_ws_error!(sender, real_wallet.get_balance(pk));
+        drop(real_wallet);
+
+        println!("Balance: {} | Owned ids: {}", balance, owned_ids.len());
 
         let mut user_data = UserData {
             balance: balance.to_string(),
@@ -923,16 +932,19 @@ async fn parse_get_user_data(
             .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
         let store_collection = database.collection::<StoreItem>(&store_collection_name);
 
+        let mut lookup_ids = Vec::new();
         for owned_id in owned_ids {
-            if let Ok(Some(item)) = store_collection.find_one(
-                doc! {"id_hash": hex::encode(unwrap_or_ws_error!(sender, owned_id.get_id()))},
-                None,
-            ) {
-                user_data.owned_store_items.push(item);
-            }
+            lookup_ids.push(hex::encode(unwrap_or_ws_error!(sender, owned_id.get_id())));
+        }
+        for item in store_collection
+            .find(doc! {"id_hash": {"$in": lookup_ids}}, None)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            user_data.owned_store_items.push(item);
         }
 
-        drop(real_wallet);
         user_data
     };
 
@@ -942,9 +954,15 @@ async fn parse_get_user_data(
     buffer[0] = CMDOpcodes::UserData as u8;
     buffer[1..].copy_from_slice(bin_json);
 
-    if let Err(e) = sender.send(Message::binary(buffer)) {
-        println!("Could not send user data: {}", e);
-    };
+    if !sender.is_closed() {
+        if let Err(e) = sender.send(Message::binary(buffer)) {
+            println!("Could not send user data: {}", e);
+        };
+    } else {
+        println!(
+            "WARNING: A connection was closed unexpectedly before being able to send user data"
+        );
+    }
 }
 
 async fn parse_get_pixel_data(
@@ -976,12 +994,14 @@ async fn parse_get_pixel_data(
     their_pk.copy_from_slice(&bin_parameters[i..i + PUBLIC_KEY_COMPRESSED_SIZE]);
     let their_pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(&their_pk, &mut 0));
 
+    println!("TEST1");
     let pixel_hash = {
         let real_canvas = canvas.lock().await;
         let pixel = unwrap_or_ws_error!(sender, real_canvas.get_pixel(x, y));
         drop(real_canvas);
         pixel.hash(x as u16, y as u16)
     };
+    println!("TEST2");
     {
         let real_wallet = wallet.lock().await;
 
@@ -989,6 +1009,7 @@ async fn parse_get_pixel_data(
 
         // Value to transfer to pixel miner
 
+        println!("TEST3");
         let value =
             unwrap_or_ws_error!(sender, TransactionValue::new_coin_transfer(DUST_PER_CEL, 0));
         let (dust, inputs) = {
@@ -1008,21 +1029,19 @@ async fn parse_get_pixel_data(
                 ));
             }
             drop(real_floating_outputs);
+
+            println!("TEST4");
             (dust, inputs)
         };
 
         // Add output transferring "value" to pixel miner
         let mut outputs = vec![TransactionOutput::new(value, their_pk)];
 
+        println!("TEST5");
         let needed_dust = DUST_PER_CEL;
         match dust.cmp(&(needed_dust)) {
             Ordering::Greater => {
                 // Output transferring unused dust (if there is unused dust)
-                println!(
-                    "WARNING: Got more dust than needed ({} > {}), this shouldn't happen too much (ideally only once)",
-                    dust,
-                    needed_dust
-                );
                 outputs.push(TransactionOutput::new(
                     unwrap_or_ws_error!(
                         sender,
@@ -1043,6 +1062,7 @@ async fn parse_get_pixel_data(
             Ordering::Equal => (),
         }
 
+        println!("TEST6");
         let mut transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
 
         let sk = unwrap_or_ws_error!(sender, real_wallet.get_sk());
@@ -1054,6 +1074,7 @@ async fn parse_get_pixel_data(
         let mut pixel_hash_response =
             vec![0u8; 1 + PIXEL_HASH_SIZE + HASH_SIZE + transaction.serialized_len()];
 
+        println!("TEST7");
         // Create response pixel data
         i = 0;
         pixel_hash_response[i] = CMDOpcodes::PixelData as u8;
@@ -1063,6 +1084,7 @@ async fn parse_get_pixel_data(
         pixel_hash_response[i..i + PIXEL_HASH_SIZE].copy_from_slice(&pixel_hash);
         i += PIXEL_HASH_SIZE;
 
+        println!("TEST8");
         // Add block hash to response
         unwrap_or_ws_error!(
             sender,
@@ -1077,11 +1099,19 @@ async fn parse_get_pixel_data(
             transaction.serialize_into(&mut pixel_hash_response, &mut i)
         );
 
-        // Send response
-        if let Err(e) = sender.send(Message::binary(pixel_hash_response)) {
-            println!("Could not send pixel hash: {}", e);
-        };
+        println!("TEST9");
+        if !sender.is_closed() {
+            // Send response
+            println!("Sending pixel hash response");
+            if let Err(e) = sender.send(Message::binary(pixel_hash_response)) {
+                println!("Could not send pixel hash: {}", e);
+            };
+            println!("Sent pixel hash response");
+        } else {
+            println!("WARNING: A connection was closed unexpectedly before being able to send pixel hash");
+        }
 
+        println!("TEST10");
         drop(real_wallet);
     }
 }
@@ -1107,15 +1137,7 @@ async fn parse_transaction(
             Transaction::from_serialized(bin_transaction, &mut i)
         );
         let mut real_wallet = wallet.lock().await;
-        let our_pk = unwrap_or_ws_error!(sender, real_wallet.get_pk());
-        let (pre_balance, owned_ids) = unwrap_or_ws_error!(sender, real_wallet.get_balance(our_pk));
         if let Err(e) = real_wallet.add_off_chain_transaction(*transaction.clone()) {
-            ws_error!(sender, e);
-        }
-        let (post_balance, owned_ids) =
-            unwrap_or_ws_error!(sender, real_wallet.get_balance(our_pk));
-
-        if let Err(e) = save_wallet(&real_wallet) {
             ws_error!(sender, e);
         }
         drop(real_wallet);
@@ -1138,15 +1160,10 @@ async fn parse_transaction(
         );
 
         let mut real_wallet = wallet.lock().await;
-        let pk = unwrap_or_ws_error!(sender, real_wallet.get_pk());
         if let Err(e) = real_wallet.add_off_chain_transaction(*pixel_transaction.clone()) {
             ws_error!(sender, e);
         }
         if let Err(e) = real_wallet.add_off_chain_transaction(*value_transaction.clone()) {
-            ws_error!(sender, e);
-        }
-
-        if let Err(e) = save_wallet(&real_wallet) {
             ws_error!(sender, e);
         }
         drop(real_wallet);
@@ -1186,7 +1203,7 @@ async fn parse_transaction(
             update_pixel_binary_message[0] = CMDOpcodes::UpdatePixel as u8;
             update_pixel_binary_message[1..]
                 .copy_from_slice(&base_transaction_message[PIXEL_HASH_SIZE..]);
-            for tx in clients.read().await.values() {
+            for tx in clients.values() {
                 if let Err(e) = tx.send(Message::binary(update_pixel_binary_message)) {
                     println!("Could not send updated pixel: {}", e);
                 }
@@ -1201,5 +1218,13 @@ async fn parse_transaction(
                 transaction_count
             )
         );
+    }
+
+    {
+        let real_wallet = wallet.lock().await;
+        if let Err(e) = save_wallet(&real_wallet) {
+            ws_error!(sender, e);
+        }
+        drop(real_wallet);
     }
 }
