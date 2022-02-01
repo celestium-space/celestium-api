@@ -69,13 +69,14 @@ def calculate_dust_value():
     for document in tqdm(d0):
         document["store_value"] = (
             document["price"]
-            if document["price"] > 1.0
-            else random.uniform(min_value, max_value)
+            if document["price"] > 1_000_000_000
+            else random.uniform(1_000_000_000, 1_000_000_000_000)
         )
         total_store_value += document["store_value"]
         d1.append(document)
 
     TOTAL_DUST = pow(2, 128) - 1
+
     value_factor = TOTAL_DUST / total_store_value
 
     logger.info(f"Total store value: {total_store_value}")
@@ -104,7 +105,7 @@ def calculate_dust_value():
         total_store_value_in_dust += document["store_value_in_dust"]
         d3.append(document)
 
-    logger.info(f"Total store value: {total_store_value_in_dust}")
+    logger.info(f"Total store value: {hex(total_store_value_in_dust)}")
     logger.info(f"Balanced dust diff: {TOTAL_DUST - total_store_value_in_dust}")
 
     for document in tqdm(d3):
