@@ -117,53 +117,57 @@ def calculate_dust_value():
 
 
 def convert_files(obj):
-    image, asteroid, output, output_256 = obj
-    process = subprocess.Popen(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            image,
-            "-c:v",
-            "libx264",
-            f'{output / asteroid["full_name"]}.mp4',
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    process.communicate()
-    image, asteroid, output, output_256 = obj
-    process = subprocess.Popen(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            image,
-            "-c:v",
-            "libx264",
-            "-vf",
-            "scale=256:256",
-            f'{output_256 / asteroid["full_name"]}.mp4',
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    process.communicate()
-    image, asteroid, output, output_256 = obj
-    process = subprocess.Popen(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            image,
-            "-vf",
-            "scale=256:256",
-            f'{output_256 / asteroid["full_name"]}.gif',
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    process.communicate()
+    image, asteroid, output, output_256, convert = obj
+    if convert:
+        process = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                image,
+                "-c:v",
+                "libx264",
+                f'{output / asteroid["full_name"]}.mp4',
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        process.communicate()
+        process = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                image,
+                "-c:v",
+                "libx264",
+                "-vf",
+                "scale=256:256",
+                f'{output_256 / asteroid["full_name"]}.mp4',
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        process.communicate()
+        process = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                image,
+                "-vf",
+                "scale=256:256",
+                f'{output_256 / asteroid["full_name"]}.gif',
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        process.communicate()
+    else:
+        stem = image.stem
+        image.rename(image.parent / f"{asteroid['full_name']}{image.suffix}")
+        (output_256 / f"{stem}.mp4").rename(output_256 / f"{asteroid['full_name']}.mp4")
+        (output_256 / f"{stem}.gif").rename(output_256 / f"{asteroid['full_name']}.gif")
 
 
 @cli.command()
@@ -188,7 +192,14 @@ def convert_files(obj):
     type=click_pathlib.Path(exists=True, file_okay=False, resolve_path=True),
     help="Directory to save 256x256 resized images",
 )
-def rename_images(images, output, output_256):
+@click.option(
+    "--convert",
+    "-c",
+    default=True,
+    type=bool,
+    help="Conversion mode (default) or rename mode (ignores output folder)",
+)
+def rename_images(images, output, output_256, convert):
 
     images = list(images.iterdir())
     try:
@@ -223,14 +234,21 @@ def rename_images(images, output, output_256):
         other_asteroids = []
         images = list(sorted(images, key=lambda x: int(x.stem)))
 
+    collection.update_many(
+        {"state": {"$ne": "bought"}}, {"$set": {"state": "unavailable"}}
+    )
+
     objs = [
-        (i, a, output, output_256)
+        (i, a, output, output_256, convert)
         for i, a in zip(
             images,
             sorted(certain_asteroids, key=lambda x: x["price"], reverse=True)
             + other_asteroids,
         )
     ]
+    for (_, a, _, _, _) in objs:
+        collection.update_one({"_id": a["_id"]}, {"$set": {"state": "available"}})
+
     with multiprocessing.Pool(multiprocessing.cpu_count()) as pool:
         [
             obj
