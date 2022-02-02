@@ -10,7 +10,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
-        Arc, Mutex as STDMutex,
+        Arc,
     },
     time::Instant,
 };
@@ -50,12 +50,10 @@ use celestium::{
 
 mod canvas;
 
-////////////////////////////////////////////////// !!! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-type SharedCanvas = Arc<RwLock<canvas::Canvas>>; // !!! IMPORTANT! Always lock SharedCanvas before SharedWallet  !!!
-type SharedWallet = Arc<Mutex<Box<Wallet>>>; ///// !!! IMPORTANT! to await potential dead locks (if using both) !!!
-type SharedFloatingOutputs = Arc<Mutex<Box<HashSet<(TransactionHash, usize)>>>>;
-type WSClients = HashMap<usize, mpsc::UnboundedSender<Message>>;
-type SharedClientsMutex = Arc<STDMutex<i32>>;
+type SharedCanvas = Arc<RwLock<canvas::Canvas>>;
+type SharedWallet = Arc<RwLock<Box<Wallet>>>;
+type SharedFloatingOutputs = Arc<RwLock<HashSet<(TransactionHash, usize)>>>;
+type WSClients = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
 type SharedLastSavedTime = Arc<Mutex<i64>>;
 
 #[allow(non_snake_case)]
@@ -260,14 +258,12 @@ async fn main() {
     //     wallet.off_chain_transactions[]
     //     // if transaction_output.value.is
     // }
-    let shared_wallet = Arc::new(Mutex::new(Box::new(wallet)));
+    let shared_wallet = Arc::new(RwLock::new(Box::new(wallet)));
 
     // initialize empty canvas
     print!("Initializing canvas...");
     let mut canvas = canvas::Canvas::new_test();
-    let real_wallet = shared_wallet.lock().await;
-    let off_chain_transactions = real_wallet.off_chain_transactions.clone();
-    drop(real_wallet);
+    let off_chain_transactions = shared_wallet.read().await.off_chain_transactions.clone();
 
     let mut to_throw_away: HashSet<[u8; PIXEL_HASH_SIZE]> = HashSet::new();
     let mut candidates: HashMap<[u8; PIXEL_HASH_SIZE], (u16, u16, Pixel)> = HashMap::new();
@@ -313,9 +309,7 @@ async fn main() {
     // Turn our "state" into a new Filter...
     let ws_clients = warp::any().map(move || ws_clients.clone());
 
-    let floating_outputs = Arc::new(Mutex::new(Box::new(HashSet::new())));
-
-    let clients_mutex: Arc<STDMutex<i32>> = Arc::new(STDMutex::new(0));
+    let floating_outputs = Arc::new(RwLock::new(HashSet::new()));
 
     let last_save_time = Arc::new(Mutex::new(Utc::now().timestamp()));
 
@@ -325,7 +319,6 @@ async fn main() {
         .and(with_wallet(shared_wallet))
         .and(with_canvas(shared_canvas))
         .and(with_floating_outputs(floating_outputs))
-        .and(with_clients_mutex(clients_mutex))
         .and(ws_clients)
         .and(database)
         .and(with_last_save_time(last_save_time))
@@ -375,7 +368,10 @@ fn load_wallet() -> Result<Wallet, String> {
 
 const MIN_SAVE_INTERVAL_S: i64 = 60 * 5;
 
-async fn save_wallet(wallet: &Wallet, last_save_time: &SharedLastSavedTime) -> Result<(), String> {
+async fn save_wallet(
+    wallet: &SharedWallet,
+    last_save_time: &SharedLastSavedTime,
+) -> Result<(), String> {
     // write members of the wallet struct to disk
     // overwrites whatever was in the way
 
@@ -396,7 +392,7 @@ async fn save_wallet(wallet: &Wallet, last_save_time: &SharedLastSavedTime) -> R
 
     println!("Writing wallet to disk.");
     let dir = wallet_dir();
-    let wallet_bin = wallet.to_binary()?;
+    let wallet_bin = wallet.read().await.to_binary()?;
     let save = |filename: &str, data: Vec<u8>| {
         File::create(dir.join(filename))
             .map(|mut f| f.write_all(&data).map_err(|e| e.to_string()))
@@ -427,7 +423,26 @@ async fn generate_wallet() -> Result<Wallet, String> {
     // TODO: this should probably panic if there's a partial wallet in the way
     println!("Generating new wallet.");
     let wallet = Wallet::generate_init_blockchain()?;
-    save_wallet(&wallet, &Arc::new(Mutex::new(Utc::now().timestamp()))).await?;
+    let dir = wallet_dir();
+    let wallet_bin = wallet.to_binary()?;
+    let save = |filename: &str, data: Vec<u8>| {
+        File::create(dir.join(filename))
+            .map(|mut f| f.write_all(&data).map_err(|e| e.to_string()))
+            .map_err(|e| e.to_string())
+    };
+    save("blockchain", wallet_bin.blockchain_bin)??;
+    save("pk", wallet_bin.pk_bin)??;
+    save("sk", wallet_bin.sk_bin)??;
+    save(
+        "on_chain_transactions",
+        wallet_bin.on_chain_transactions_bin,
+    )??;
+    save("unspent_outputs", wallet_bin.unspent_outputs_bin)??;
+    save("nft_lookups", wallet_bin.nft_lookups_bin)??;
+    save(
+        "off_chain_transactions",
+        wallet_bin.off_chain_transactions_bin,
+    )??;
     Ok(wallet)
 }
 
@@ -450,12 +465,6 @@ fn with_floating_outputs(
     warp::any().map(move || floating_outputs.clone())
 }
 
-fn with_clients_mutex(
-    clients_mutex: SharedClientsMutex,
-) -> impl Filter<Extract = (SharedClientsMutex,), Error = Infallible> + Clone {
-    warp::any().map(move || clients_mutex.clone())
-}
-
 fn with_last_save_time(
     last_save_time: SharedLastSavedTime,
 ) -> impl Filter<Extract = (SharedLastSavedTime,), Error = Infallible> + Clone {
@@ -467,7 +476,6 @@ async fn ws_handler(
     wallet: SharedWallet,
     canvas: SharedCanvas,
     floating_outputs: SharedFloatingOutputs,
-    clients_mutex: SharedClientsMutex,
     clients: WSClients,
     database: Database,
     last_save_time: SharedLastSavedTime,
@@ -481,7 +489,6 @@ async fn ws_handler(
             wallet,
             canvas,
             floating_outputs,
-            clients_mutex,
             clients,
             database,
             last_save_time,
@@ -521,8 +528,7 @@ async fn client_connection(
     wallet: SharedWallet,
     canvas: SharedCanvas,
     floating_outputs: SharedFloatingOutputs,
-    clients_mutex: SharedClientsMutex,
-    mut clients: WSClients,
+    clients: WSClients,
     database: Database,
     last_save_time: SharedLastSavedTime,
 ) {
@@ -535,11 +541,8 @@ async fn client_connection(
 
     // Save the sender in our list of connected users.
 
-    {
-        let _ = clients_mutex.lock().unwrap();
-        clients.insert(my_id, tx);
-    }
-    println!("Current clients: {}", clients.len());
+    clients.write().await.insert(my_id, tx);
+    println!("Current clients: {}", clients.read().await.len());
 
     tokio::task::spawn(async move {
         while let Some(message) = rx.next().await {
@@ -573,8 +576,8 @@ async fn client_connection(
         .await;
     }
 
-    clients.remove(&my_id);
-    println!("Current clients: {}", clients.len());
+    clients.write().await.remove(&my_id);
+    println!("Current clients: {}", clients.read().await.len());
 }
 
 async fn handle_ws_message(
@@ -589,8 +592,7 @@ async fn handle_ws_message(
 ) {
     // this is the function that actually receives a message
     // validate it, add it to the blockchain, then exit.
-
-    let sender = clients.get(&my_id).unwrap();
+    let sender = clients.read().await.get(&my_id).unwrap().clone();
 
     if !message.is_binary() {
         ws_error!(sender, "Expected binary WS message.".to_string());
@@ -613,7 +615,7 @@ async fn handle_ws_message(
         Some(CMDOpcodes::MinedTransaction) => {
             parse_transaction(
                 &binary_message[1..],
-                sender,
+                &sender,
                 wallet,
                 canvas,
                 floating_outputs,
@@ -625,7 +627,7 @@ async fn handle_ws_message(
         Some(CMDOpcodes::GetPixelData) => {
             parse_get_pixel_data(
                 &binary_message[1..],
-                sender,
+                &sender,
                 wallet,
                 canvas,
                 floating_outputs,
@@ -635,7 +637,7 @@ async fn handle_ws_message(
         Some(CMDOpcodes::BuyStoreItem) => {
             parse_buy_store_item(
                 &binary_message[1..],
-                sender,
+                &sender,
                 wallet,
                 database,
                 last_save_time,
@@ -643,10 +645,10 @@ async fn handle_ws_message(
             .await
         }
         Some(CMDOpcodes::GetStoreItem) => {
-            parse_get_store_item(&binary_message[1..], sender, database).await
+            parse_get_store_item(&binary_message[1..], &sender, database).await
         }
         Some(CMDOpcodes::GetUserData) => {
-            parse_get_user_data(&binary_message[1..], sender, wallet, database).await
+            parse_get_user_data(&binary_message[1..], &sender, wallet, database).await
         }
         _ => {
             ws_error!(
@@ -710,12 +712,10 @@ async fn parse_buy_store_item(
     // First, get ID base transaction output,
     // since this may not have been created yet
     // we will release wallet lock during mining
-    let real_wallet = wallet.lock().await;
-    let head_hash = real_wallet.get_head_hash();
-    let our_pk = real_wallet.get_pk();
-    let nft_count = real_wallet.count_nft_lookup();
-    let nft = real_wallet.lookup_nft(id_hash);
-    drop(real_wallet);
+    let head_hash = wallet.read().await.get_head_hash();
+    let our_pk = wallet.read().await.get_pk();
+    let nft_count = wallet.read().await.count_nft_lookup();
+    let nft = wallet.read().await.lookup_nft(id_hash);
 
     let our_pk = unwrap_or_ws_error!(sender, our_pk);
 
@@ -766,11 +766,8 @@ async fn parse_buy_store_item(
                 );
 
                 // Mining done and we can retake the wallet lock
-                let mut real_wallet = wallet.lock().await;
-                let res = real_wallet.add_off_chain_transaction(t);
-                drop(real_wallet);
+                unwrap_or_ws_error!(sender, wallet.write().await.add_off_chain_transaction(t));
 
-                unwrap_or_ws_error!(sender, res);
                 unwrap_or_ws_error!(
                     sender,
                     store_collection.update_one(
@@ -780,10 +777,8 @@ async fn parse_buy_store_item(
                     )
                 );
 
-                let real_wallet = wallet.lock().await;
-                let n = real_wallet.lookup_nft(id_hash).unwrap();
-                let res = save_wallet(&real_wallet, last_save_time).await;
-                drop(real_wallet);
+                let n = wallet.read().await.lookup_nft(id_hash).unwrap();
+                let res = save_wallet(&wallet, last_save_time).await;
 
                 unwrap_or_ws_error!(sender, res);
                 n
@@ -791,9 +786,7 @@ async fn parse_buy_store_item(
         }
     };
 
-    let real_wallet = wallet.lock().await;
-    let our_unspent_outputs = real_wallet.unspent_outputs.get(&our_pk);
-    match our_unspent_outputs {
+    match wallet.read().await.unspent_outputs.get(&our_pk) {
         Some(our_unspent_outputs) => {
             if our_unspent_outputs
                 .get(&(
@@ -803,16 +796,13 @@ async fn parse_buy_store_item(
                 ))
                 .is_none()
             {
-                drop(real_wallet);
                 ws_error!(sender, "NFT not owned by us");
             };
         }
         None => {
-            drop(real_wallet);
             ws_error!(sender, "NFT not owned by us");
         }
     }
-    drop(real_wallet);
 
     // Create the transaction to transfer ID to client and value to us
     let transaction = {
@@ -821,11 +811,13 @@ async fn parse_buy_store_item(
             TransactionValue::new_coin_transfer(store_value_in_dust, 0)
         );
 
-        let real_wallet = wallet.lock().await;
-        let res = real_wallet.collect_for_coin_transfer(&value, their_pk, HashSet::new());
-        drop(real_wallet);
-
-        let (dust, mut inputs) = unwrap_or_ws_error!(sender, res);
+        let (dust, mut inputs) = unwrap_or_ws_error!(
+            sender,
+            wallet
+                .read()
+                .await
+                .collect_for_coin_transfer(&value, their_pk, HashSet::new())
+        );
 
         if dust < store_value_in_dust {
             ws_error!(
@@ -871,14 +863,13 @@ async fn parse_buy_store_item(
 
         let mut transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
 
-        let real_wallet = wallet.lock().await;
-        let res = transaction.sign(
-            real_wallet.get_sk().unwrap(),
-            transaction.count_inputs() - 1,
+        unwrap_or_ws_error!(
+            sender,
+            transaction.sign(
+                wallet.read().await.get_sk().unwrap(),
+                transaction.count_inputs() - 1,
+            )
         );
-        drop(real_wallet);
-
-        unwrap_or_ws_error!(sender, res);
 
         transaction
     };
@@ -973,11 +964,7 @@ async fn parse_get_user_data(
     println!("Got user data request for: [0x{}]", pk);
 
     let user_data = {
-        let real_wallet = wallet.lock().await;
-        let res = real_wallet.get_balance(pk);
-        drop(real_wallet);
-
-        let (balance, owned_ids) = unwrap_or_ws_error!(sender, res);
+        let (balance, owned_ids) = unwrap_or_ws_error!(sender, wallet.read().await.get_balance(pk));
 
         println!("Balance: {} | Owned ids: {}", balance, owned_ids.len());
 
@@ -1056,41 +1043,31 @@ async fn parse_get_pixel_data(
         unwrap_or_ws_error!(sender, canvas.read().await.get_pixel(x, y)).hash(x as u16, y as u16);
 
     {
-        let real_wallet = wallet.lock().await;
-        let pk_res = real_wallet.get_pk();
-        let sk_res = real_wallet.get_sk();
-        let head_hash = real_wallet.get_head_hash();
-        drop(real_wallet);
-
-        let our_pk = unwrap_or_ws_error!(sender, pk_res);
-        let our_sk = unwrap_or_ws_error!(sender, sk_res);
+        let our_pk = unwrap_or_ws_error!(sender, wallet.read().await.get_pk());
+        let our_sk = unwrap_or_ws_error!(sender, wallet.read().await.get_sk());
+        let head_hash = wallet.read().await.get_head_hash();
 
         // Value to transfer to pixel miner
 
         let value =
             unwrap_or_ws_error!(sender, TransactionValue::new_coin_transfer(DUST_PER_CEL, 0));
         let (dust, inputs) = {
-            let mut real_floating_outputs = floating_outputs.lock().await;
-
-            let real_wallet = wallet.lock().await;
-            let res = real_wallet.collect_for_coin_transfer(
-                &value,
-                our_pk,
-                *real_floating_outputs.clone(),
-            );
-            drop(real_wallet);
-
             // So we do not hold the wallet lock while trying to communicate over ws
-            let (dust, inputs) = unwrap_or_ws_error!(sender, res);
+            let (dust, inputs) = unwrap_or_ws_error!(
+                sender,
+                wallet.read().await.collect_for_coin_transfer(
+                    &value,
+                    our_pk,
+                    floating_outputs.read().await.clone(),
+                )
+            );
 
             for input in &inputs {
-                real_floating_outputs.insert((
+                floating_outputs.write().await.insert((
                     input.transaction_hash.clone(),
                     input.output_index.get_value(),
                 ));
             }
-            drop(real_floating_outputs);
-
             (dust, inputs)
         };
 
@@ -1185,16 +1162,20 @@ async fn parse_transaction(
             sender,
             Transaction::from_serialized(bin_transaction, &mut i)
         );
-        let mut real_wallet = wallet.lock().await;
-        let res = real_wallet.add_off_chain_transaction(*transaction.clone());
-        drop(real_wallet);
-        unwrap_or_ws_error!(sender, res);
+        unwrap_or_ws_error!(
+            sender,
+            wallet
+                .write()
+                .await
+                .add_off_chain_transaction(*transaction.clone())
+        );
 
-        let mut real_floating_outputs = floating_outputs.lock().await;
         for input in transaction.get_inputs() {
-            real_floating_outputs.remove(&(input.transaction_hash, input.output_index.get_value()));
+            floating_outputs
+                .write()
+                .await
+                .remove(&(input.transaction_hash, input.output_index.get_value()));
         }
-        drop(real_floating_outputs);
     } else if transaction_count.get_value() == 2 {
         println!("Got 2 transactions");
         let pixel_transaction = unwrap_or_ws_error!(
@@ -1207,21 +1188,24 @@ async fn parse_transaction(
             Transaction::from_serialized(bin_transaction, &mut i)
         );
 
-        let mut real_wallet = wallet.lock().await;
-        let pixel_transaction_add_res =
-            real_wallet.add_off_chain_transaction(*pixel_transaction.clone());
-        let value_transaction_add_res =
-            real_wallet.add_off_chain_transaction(*value_transaction.clone());
-        drop(real_wallet);
+        let pixel_transaction_add_res = wallet
+            .write()
+            .await
+            .add_off_chain_transaction(*pixel_transaction.clone());
+        let value_transaction_add_res = wallet
+            .write()
+            .await
+            .add_off_chain_transaction(*value_transaction.clone());
 
         unwrap_or_ws_error!(sender, pixel_transaction_add_res);
         unwrap_or_ws_error!(sender, value_transaction_add_res);
 
-        let mut real_floating_outputs = floating_outputs.lock().await;
         for input in value_transaction.get_inputs() {
-            real_floating_outputs.remove(&(input.transaction_hash, input.output_index.get_value()));
+            floating_outputs
+                .write()
+                .await
+                .remove(&(input.transaction_hash, input.output_index.get_value()));
         }
-        drop(real_floating_outputs);
 
         let base_transaction_message =
             unwrap_or_ws_error!(sender, pixel_transaction.get_base_transaction_message())
@@ -1251,7 +1235,7 @@ async fn parse_transaction(
             update_pixel_binary_message[0] = CMDOpcodes::UpdatePixel as u8;
             update_pixel_binary_message[1..]
                 .copy_from_slice(&base_transaction_message[PIXEL_HASH_SIZE..]);
-            for tx in clients.values() {
+            for tx in clients.read().await.values() {
                 if let Err(e) = tx.send(Message::binary(update_pixel_binary_message)) {
                     println!("Could not send updated pixel: {}", e);
                 }
@@ -1267,11 +1251,5 @@ async fn parse_transaction(
         );
     }
 
-    {
-        let real_wallet = wallet.lock().await;
-        let res = save_wallet(&real_wallet, last_save_time).await;
-        drop(real_wallet);
-
-        unwrap_or_ws_error!(sender, res);
-    }
+    unwrap_or_ws_error!(sender, save_wallet(&wallet, last_save_time).await);
 }
