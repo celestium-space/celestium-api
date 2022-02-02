@@ -30,7 +30,7 @@ use rayon::ThreadPoolBuilder;
 use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize as SerdeSerialize};
 use sha3::{Digest, Sha3_256};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::{filters::ws::Message, Filter, Rejection, Reply};
 
@@ -51,7 +51,7 @@ use celestium::{
 mod canvas;
 
 ////////////////////////////////////////////////// !!! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-type SharedCanvas = Arc<Mutex<canvas::Canvas>>; // !!! IMPORTANT! Always lock SharedCanvas before SharedWallet  !!!
+type SharedCanvas = Arc<RwLock<canvas::Canvas>>; // !!! IMPORTANT! Always lock SharedCanvas before SharedWallet  !!!
 type SharedWallet = Arc<Mutex<Box<Wallet>>>; ///// !!! IMPORTANT! to await potential dead locks (if using both) !!!
 type SharedFloatingOutputs = Arc<Mutex<Box<HashSet<(TransactionHash, usize)>>>>;
 type WSClients = HashMap<usize, mpsc::UnboundedSender<Message>>;
@@ -264,7 +264,7 @@ async fn main() {
 
     // initialize empty canvas
     print!("Initializing canvas...");
-    let mut shared_canvas = canvas::Canvas::new_test();
+    let mut canvas = canvas::Canvas::new_test();
     let real_wallet = shared_wallet.lock().await;
     let off_chain_transactions = real_wallet.off_chain_transactions.clone();
     drop(real_wallet);
@@ -298,13 +298,13 @@ async fn main() {
     for (x, y, p) in candidates.values() {
         if to_throw_away.contains(&p.back_hash) || p.back_hash.is_empty() {
             actual_candidates += 1;
-            shared_canvas
+            canvas
                 .set_pixel((*x).into(), (*y).into(), p.clone())
                 .unwrap();
         }
     }
     println!("Found {} acutal candidates", actual_candidates);
-    let shared_canvas = Arc::new(Mutex::new(shared_canvas));
+    let shared_canvas = Arc::new(RwLock::new(canvas));
     println!(" Done!");
 
     // Keep track of all connected users, key is usize, value
@@ -444,7 +444,6 @@ fn with_canvas(
 ) -> impl Filter<Extract = (SharedCanvas,), Error = Infallible> + Clone {
     warp::any().map(move || canvas.clone())
 }
-
 fn with_floating_outputs(
     floating_outputs: SharedFloatingOutputs,
 ) -> impl Filter<Extract = (SharedFloatingOutputs,), Error = Infallible> + Clone {
@@ -600,9 +599,7 @@ async fn handle_ws_message(
     let binary_message = message.as_bytes();
     match FromPrimitive::from_u8(binary_message[0]) {
         Some(CMDOpcodes::GetEntireImage) => {
-            let real_canvas = canvas.lock().await;
-            let mut entire_image = real_canvas.serialize_colors();
-            drop(real_canvas);
+            let mut entire_image = canvas.read().await.serialize_colors();
 
             entire_image.insert(0, CMDOpcodes::EntireImage as u8);
             if !sender.is_closed() {
@@ -698,29 +695,17 @@ async fn parse_buy_store_item(
     };
 
     let store_value_in_dust = unwrap_or_ws_error!(sender, item.store_value_in_dust.parse::<u128>());
+    let path = format!(
+        "../celestium-frontend/public/videos-full/{}.mp4",
+        item.full_name
+    );
 
+    let mut file = unwrap_or_ws_error!(sender, File::open(path));
+    let mut video_bytes = vec![];
+    unwrap_or_ws_error!(sender, file.read_to_end(&mut video_bytes));
     let full_name_bytes = item.full_name.as_bytes();
-    let id_hash = *Sha3_256::digest(
-        &[
-            full_name_bytes,
-            unwrap_or_ws_error!(
-                sender,
-                unwrap_or_ws_error!(
-                    sender,
-                    reqwest::get(format!(
-                        "https://celestium.space/videos/{}.mp4",
-                        item.full_name
-                    ))
-                    .await
-                )
-                .bytes()
-                .await
-            )
-            .as_ref(),
-        ]
-        .concat(),
-    )
-    .as_ref();
+    let id_digest = &[full_name_bytes, &[0u8], video_bytes.as_ref()].concat();
+    let id_hash = *Sha3_256::digest(id_digest).as_ref();
 
     // First, get ID base transaction output,
     // since this may not have been created yet
@@ -1067,12 +1052,8 @@ async fn parse_get_pixel_data(
     their_pk.copy_from_slice(&bin_parameters[i..i + PUBLIC_KEY_COMPRESSED_SIZE]);
     let their_pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(&their_pk, &mut 0));
 
-    let pixel_hash = {
-        let real_canvas = canvas.lock().await;
-        let pixel = unwrap_or_ws_error!(sender, real_canvas.get_pixel(x, y));
-        drop(real_canvas);
-        pixel.hash(x as u16, y as u16)
-    };
+    let pixel_hash =
+        unwrap_or_ws_error!(sender, canvas.read().await.get_pixel(x, y)).hash(x as u16, y as u16);
 
     {
         let real_wallet = wallet.lock().await;
@@ -1251,13 +1232,11 @@ async fn parse_transaction(
             canvas::Canvas::parse_pixel(base_transaction_message)
         );
 
-        let mut real_canvas = canvas.lock().await;
-        let current_pixel_hash = unwrap_or_ws_error!(sender, real_canvas.get_pixel(x, y))
+        let current_pixel_hash = unwrap_or_ws_error!(sender, canvas.read().await.get_pixel(x, y))
             .hash(x as u16, y as u16)
             .to_vec();
         let new_pixel_back_ref_hash = base_transaction_message[..PIXEL_HASH_SIZE].to_vec();
         if current_pixel_hash != new_pixel_back_ref_hash {
-            drop(real_canvas);
             ws_error!(
                 sender,
                 format!(
@@ -1266,8 +1245,7 @@ async fn parse_transaction(
                 )
             );
         } else {
-            unwrap_or_ws_error!(sender, real_canvas.set_pixel(x, y, pixel));
-            drop(real_canvas);
+            unwrap_or_ws_error!(sender, canvas.write().await.set_pixel(x, y, pixel));
 
             let mut update_pixel_binary_message = [0u8; 6];
             update_pixel_binary_message[0] = CMDOpcodes::UpdatePixel as u8;
