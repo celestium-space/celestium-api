@@ -51,7 +51,7 @@ use celestium::{
 mod canvas;
 
 type SharedCanvas = Arc<RwLock<canvas::Canvas>>;
-type SharedWallet = Arc<RwLock<Box<Wallet>>>;
+type SharedWallet = Arc<RwLock<Wallet>>;
 type SharedFloatingOutputs = Arc<RwLock<HashSet<(TransactionHash, usize)>>>;
 type WSClients = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
 type SharedLastSavedTime = Arc<Mutex<i64>>;
@@ -258,12 +258,11 @@ async fn main() {
     //     wallet.off_chain_transactions[]
     //     // if transaction_output.value.is
     // }
-    let shared_wallet = Arc::new(RwLock::new(Box::new(wallet)));
 
     // initialize empty canvas
     print!("Initializing canvas...");
     let mut canvas = canvas::Canvas::new_test();
-    let off_chain_transactions = shared_wallet.read().await.off_chain_transactions.clone();
+    let off_chain_transactions = wallet.off_chain_transactions.clone();
 
     let mut to_throw_away: HashSet<[u8; PIXEL_HASH_SIZE]> = HashSet::new();
     let mut candidates: HashMap<[u8; PIXEL_HASH_SIZE], (u16, u16, Pixel)> = HashMap::new();
@@ -302,6 +301,8 @@ async fn main() {
     println!("Found {} acutal candidates", actual_candidates);
     let shared_canvas = Arc::new(RwLock::new(canvas));
     println!(" Done!");
+
+    let shared_wallet = Arc::new(RwLock::new(wallet));
 
     // Keep track of all connected users, key is usize, value
     // is a websocket sender.
@@ -766,7 +767,7 @@ async fn parse_buy_store_item(
                 );
 
                 // Mining done and we can retake the wallet lock
-                unwrap_or_ws_error!(sender, wallet.write().await.add_off_chain_transaction(t));
+                unwrap_or_ws_error!(sender, wallet.write().await.add_off_chain_transaction(&t));
 
                 unwrap_or_ws_error!(
                     sender,
@@ -1043,26 +1044,19 @@ async fn parse_get_pixel_data(
     their_pk.copy_from_slice(&bin_parameters[i..i + PUBLIC_KEY_COMPRESSED_SIZE]);
     let their_pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(&their_pk, &mut 0));
 
-    let start = Instant::now();
     let pixel_hash =
         unwrap_or_ws_error!(sender, canvas.read().await.get_pixel(x, y)).hash(x as u16, y as u16);
-    println!("Got pixel hash, took {:?}", start.elapsed());
 
-    let start = Instant::now();
     let our_pk = unwrap_or_ws_error!(sender, wallet.read().await.get_pk());
     let our_sk = unwrap_or_ws_error!(sender, wallet.read().await.get_sk());
     let head_hash = wallet.read().await.get_head_hash();
-    println!("Got pks, took {:?}", start.elapsed());
 
     // Value to transfer to pixel miner
     let value = unwrap_or_ws_error!(sender, TransactionValue::new_coin_transfer(DUST_PER_CEL, 0));
     let (dust, inputs) = {
         // So we do not hold the wallet lock while trying to communicate over ws
-        let start = Instant::now();
         let floating_outputs_clone = floating_outputs.read().await.clone();
-        println!("Got floating outputs, took {:?}", start.elapsed());
 
-        let start = Instant::now();
         let (dust, inputs) = unwrap_or_ws_error!(
             sender,
             wallet
@@ -1070,16 +1064,13 @@ async fn parse_get_pixel_data(
                 .await
                 .collect_for_coin_transfer(&value, our_pk, floating_outputs_clone,)
         );
-        println!("Collected dust, took {:?}", start.elapsed());
 
-        let start = Instant::now();
         for input in &inputs {
             floating_outputs.write().await.insert((
                 input.transaction_hash.clone(),
                 input.output_index.get_value(),
             ));
         }
-        println!("Floating output added, took {:?}", start.elapsed());
         (dust, inputs)
     };
 
@@ -1177,10 +1168,7 @@ async fn parse_transaction(
         );
         unwrap_or_ws_error!(
             sender,
-            wallet
-                .write()
-                .await
-                .add_off_chain_transaction(*transaction.clone())
+            wallet.write().await.add_off_chain_transaction(&transaction)
         );
 
         for input in transaction.get_inputs() {
@@ -1206,14 +1194,14 @@ async fn parse_transaction(
             wallet
                 .read()
                 .await
-                .verify_transaction(*pixel_transaction.clone())
+                .verify_off_chain_transaction(&pixel_transaction)
         );
         unwrap_or_ws_error!(
             sender,
             wallet
                 .read()
                 .await
-                .verify_transaction(*value_transaction.clone())
+                .verify_off_chain_transaction(&value_transaction)
         );
 
         let base_transaction_message =
@@ -1256,14 +1244,14 @@ async fn parse_transaction(
             wallet
                 .write()
                 .await
-                .add_off_chain_transaction(*pixel_transaction.clone())
+                .add_off_chain_transaction(&pixel_transaction)
         );
         unwrap_or_ws_error!(
             sender,
             wallet
                 .write()
                 .await
-                .add_off_chain_transaction(*value_transaction.clone())
+                .add_off_chain_transaction(&value_transaction)
         );
         for input in value_transaction.get_inputs() {
             floating_outputs
