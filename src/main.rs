@@ -959,12 +959,16 @@ async fn parse_get_user_data(
 ) {
     let mut pk = [0u8; PUBLIC_KEY_COMPRESSED_SIZE];
     pk.copy_from_slice(&bin_parameters[..PUBLIC_KEY_COMPRESSED_SIZE]);
-    let pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(&pk, &mut 0));
+    let their_pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(&pk, &mut 0));
 
-    println!("Got user data request for: [0x{}]", pk);
+    println!(
+        "Got user data request for: [0x{}]",
+        hex::encode(their_pk.serialize())
+    );
 
     let user_data = {
-        let (balance, owned_ids) = unwrap_or_ws_error!(sender, wallet.read().await.get_balance(pk));
+        let (balance, owned_ids) =
+            unwrap_or_ws_error!(sender, wallet.read().await.get_balance(their_pk));
 
         println!("Balance: {} | Owned ids: {}", balance, owned_ids.len());
 
@@ -1039,106 +1043,115 @@ async fn parse_get_pixel_data(
     their_pk.copy_from_slice(&bin_parameters[i..i + PUBLIC_KEY_COMPRESSED_SIZE]);
     let their_pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(&their_pk, &mut 0));
 
+    let start = Instant::now();
     let pixel_hash =
         unwrap_or_ws_error!(sender, canvas.read().await.get_pixel(x, y)).hash(x as u16, y as u16);
+    println!("Got pixel hash, took {:?}", start.elapsed());
 
-    {
-        let our_pk = unwrap_or_ws_error!(sender, wallet.read().await.get_pk());
-        let our_sk = unwrap_or_ws_error!(sender, wallet.read().await.get_sk());
-        let head_hash = wallet.read().await.get_head_hash();
+    let start = Instant::now();
+    let our_pk = unwrap_or_ws_error!(sender, wallet.read().await.get_pk());
+    let our_sk = unwrap_or_ws_error!(sender, wallet.read().await.get_sk());
+    let head_hash = wallet.read().await.get_head_hash();
+    println!("Got pks, took {:?}", start.elapsed());
 
-        // Value to transfer to pixel miner
+    // Value to transfer to pixel miner
+    let value = unwrap_or_ws_error!(sender, TransactionValue::new_coin_transfer(DUST_PER_CEL, 0));
+    let (dust, inputs) = {
+        // So we do not hold the wallet lock while trying to communicate over ws
+        let start = Instant::now();
+        let floating_outputs_clone = floating_outputs.read().await.clone();
+        println!("Got floating outputs, took {:?}", start.elapsed());
 
-        let value =
-            unwrap_or_ws_error!(sender, TransactionValue::new_coin_transfer(DUST_PER_CEL, 0));
-        let (dust, inputs) = {
-            // So we do not hold the wallet lock while trying to communicate over ws
-            let (dust, inputs) = unwrap_or_ws_error!(
+        let start = Instant::now();
+        let (dust, inputs) = unwrap_or_ws_error!(
+            sender,
+            wallet
+                .read()
+                .await
+                .collect_for_coin_transfer(&value, our_pk, floating_outputs_clone,)
+        );
+        println!("Collected dust, took {:?}", start.elapsed());
+
+        let start = Instant::now();
+        for input in &inputs {
+            floating_outputs.write().await.insert((
+                input.transaction_hash.clone(),
+                input.output_index.get_value(),
+            ));
+        }
+        println!("Floating output added, took {:?}", start.elapsed());
+        (dust, inputs)
+    };
+
+    // Add output transferring "value" to pixel miner
+    let mut outputs = vec![TransactionOutput::new(value, their_pk)];
+
+    let needed_dust = DUST_PER_CEL;
+    match dust.cmp(&(needed_dust)) {
+        Ordering::Greater => {
+            // Output transferring unused dust (if there is unused dust)
+            outputs.push(TransactionOutput::new(
+                unwrap_or_ws_error!(
+                    sender,
+                    TransactionValue::new_coin_transfer(dust - needed_dust, 0)
+                ),
+                our_pk,
+            ));
+        }
+        Ordering::Less => {
+            ws_error!(
                 sender,
-                wallet.read().await.collect_for_coin_transfer(
-                    &value,
-                    our_pk,
-                    floating_outputs.read().await.clone(),
+                format!(
+                    "Could not find enough dust to pay you, only found {} expected at least {}",
+                    dust, needed_dust
                 )
             );
+        }
+        Ordering::Equal => (),
+    }
 
-            for input in &inputs {
-                floating_outputs.write().await.insert((
-                    input.transaction_hash.clone(),
-                    input.output_index.get_value(),
-                ));
-            }
-            (dust, inputs)
+    let mut transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
+
+    for i in 0..transaction.count_inputs() {
+        unwrap_or_ws_error!(sender, transaction.sign(our_sk, i));
+    }
+
+    // Create response vector
+    let mut pixel_hash_response =
+        vec![0u8; 1 + PIXEL_HASH_SIZE + HASH_SIZE + transaction.serialized_len()];
+
+    // Create response pixel data
+    i = 0;
+    pixel_hash_response[i] = CMDOpcodes::PixelData as u8;
+    i += 1;
+
+    // Add pixel hash to response
+    pixel_hash_response[i..i + PIXEL_HASH_SIZE].copy_from_slice(&pixel_hash);
+    i += PIXEL_HASH_SIZE;
+
+    // Add block hash to response
+    unwrap_or_ws_error!(
+        sender,
+        head_hash.serialize_into(&mut pixel_hash_response, &mut i)
+    );
+
+    // Add transaction to response
+    unwrap_or_ws_error!(
+        sender,
+        transaction.serialize_into(&mut pixel_hash_response, &mut i)
+    );
+
+    if !sender.is_closed() {
+        // Send response
+        println!("Sending pixel hash response");
+        if let Err(e) = sender.send(Message::binary(pixel_hash_response)) {
+            println!("Could not send pixel hash: {}", e);
         };
-
-        // Add output transferring "value" to pixel miner
-        let mut outputs = vec![TransactionOutput::new(value, their_pk)];
-
-        let needed_dust = DUST_PER_CEL;
-        match dust.cmp(&(needed_dust)) {
-            Ordering::Greater => {
-                // Output transferring unused dust (if there is unused dust)
-                outputs.push(TransactionOutput::new(
-                    unwrap_or_ws_error!(
-                        sender,
-                        TransactionValue::new_coin_transfer(dust - needed_dust, 0)
-                    ),
-                    our_pk,
-                ));
-            }
-            Ordering::Less => {
-                ws_error!(
-                    sender,
-                    format!(
-                        "Could not find enough dust to pay you, only found {} expected at least {}",
-                        dust, needed_dust
-                    )
-                );
-            }
-            Ordering::Equal => (),
-        }
-
-        let mut transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
-
-        for i in 0..transaction.count_inputs() {
-            unwrap_or_ws_error!(sender, transaction.sign(our_sk, i));
-        }
-
-        // Create response vector
-        let mut pixel_hash_response =
-            vec![0u8; 1 + PIXEL_HASH_SIZE + HASH_SIZE + transaction.serialized_len()];
-
-        // Create response pixel data
-        i = 0;
-        pixel_hash_response[i] = CMDOpcodes::PixelData as u8;
-        i += 1;
-
-        // Add pixel hash to response
-        pixel_hash_response[i..i + PIXEL_HASH_SIZE].copy_from_slice(&pixel_hash);
-        i += PIXEL_HASH_SIZE;
-
-        // Add block hash to response
-        unwrap_or_ws_error!(
-            sender,
-            head_hash.serialize_into(&mut pixel_hash_response, &mut i)
+        println!("Sent pixel hash response");
+    } else {
+        println!(
+            "WARNING: A connection was closed unexpectedly before being able to send pixel hash"
         );
-
-        // Add transaction to response
-        unwrap_or_ws_error!(
-            sender,
-            transaction.serialize_into(&mut pixel_hash_response, &mut i)
-        );
-
-        if !sender.is_closed() {
-            // Send response
-            println!("Sending pixel hash response");
-            if let Err(e) = sender.send(Message::binary(pixel_hash_response)) {
-                println!("Could not send pixel hash: {}", e);
-            };
-            println!("Sent pixel hash response");
-        } else {
-            println!("WARNING: A connection was closed unexpectedly before being able to send pixel hash");
-        }
     }
 }
 
@@ -1188,24 +1201,20 @@ async fn parse_transaction(
             Transaction::from_serialized(bin_transaction, &mut i)
         );
 
-        let pixel_transaction_add_res = wallet
-            .write()
-            .await
-            .add_off_chain_transaction(*pixel_transaction.clone());
-        let value_transaction_add_res = wallet
-            .write()
-            .await
-            .add_off_chain_transaction(*value_transaction.clone());
-
-        unwrap_or_ws_error!(sender, pixel_transaction_add_res);
-        unwrap_or_ws_error!(sender, value_transaction_add_res);
-
-        for input in value_transaction.get_inputs() {
-            floating_outputs
-                .write()
+        unwrap_or_ws_error!(
+            sender,
+            wallet
+                .read()
                 .await
-                .remove(&(input.transaction_hash, input.output_index.get_value()));
-        }
+                .verify_transaction(*pixel_transaction.clone())
+        );
+        unwrap_or_ws_error!(
+            sender,
+            wallet
+                .read()
+                .await
+                .verify_transaction(*value_transaction.clone())
+        );
 
         let base_transaction_message =
             unwrap_or_ws_error!(sender, pixel_transaction.get_base_transaction_message())
@@ -1240,6 +1249,27 @@ async fn parse_transaction(
                     println!("Could not send updated pixel: {}", e);
                 }
             }
+        }
+
+        unwrap_or_ws_error!(
+            sender,
+            wallet
+                .write()
+                .await
+                .add_off_chain_transaction(*pixel_transaction.clone())
+        );
+        unwrap_or_ws_error!(
+            sender,
+            wallet
+                .write()
+                .await
+                .add_off_chain_transaction(*value_transaction.clone())
+        );
+        for input in value_transaction.get_inputs() {
+            floating_outputs
+                .write()
+                .await
+                .remove(&(input.transaction_hash, input.output_index.get_value()));
         }
     } else {
         ws_error!(
