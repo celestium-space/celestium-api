@@ -253,11 +253,6 @@ async fn main() {
             }
         }
     };
-    // for ((block_hash, transaction_hash, index), transaction_output) in wallet.unspent_outputs.iter()
-    // {
-    //     wallet.off_chain_transactions[]
-    //     // if transaction_output.value.is
-    // }
 
     // initialize empty canvas
     print!("Initializing canvas...");
@@ -619,6 +614,7 @@ async fn handle_ws_message(
                 &sender,
                 wallet,
                 canvas,
+                database,
                 floating_outputs,
                 clients,
                 last_save_time,
@@ -773,15 +769,13 @@ async fn parse_buy_store_item(
                     sender,
                     store_collection.update_one(
                         doc! {"_id": item._id},
-                        doc! {"$set": {"id_hash": hex::encode(id_hash), "state": "bought"}},
+                        doc! {"$set": {"id_hash": hex::encode(id_hash)}},
                         None,
                     )
                 );
 
                 let n = wallet.read().await.lookup_nft(id_hash).unwrap();
-                let res = save_wallet(&wallet, last_save_time).await;
-
-                unwrap_or_ws_error!(sender, res);
+                unwrap_or_ws_error!(sender, save_wallet(&wallet, last_save_time).await);
                 n
             }
         }
@@ -1151,6 +1145,7 @@ async fn parse_transaction(
     sender: &mpsc::UnboundedSender<Message>,
     wallet: &SharedWallet,
     canvas: &SharedCanvas,
+    database: &Database,
     floating_outputs: &SharedFloatingOutputs,
     clients: &WSClients,
     last_save_time: &SharedLastSavedTime,
@@ -1166,6 +1161,23 @@ async fn parse_transaction(
             sender,
             Transaction::from_serialized(bin_transaction, &mut i)
         );
+
+        let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
+            .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
+        let store_collection = database.collection::<StoreItem>(&store_collection_name);
+
+        for o in transaction.get_outputs() {
+            if let Ok(id_hash) = o.value.get_id() {
+                unwrap_or_ws_error!(
+                    sender,
+                    store_collection.update_one(
+                        doc! {"id_hash": hex::encode(id_hash)},
+                        doc! {"$set": {"state": "bought"}},
+                        None,
+                    )
+                );
+            }
+        }
         unwrap_or_ws_error!(
             sender,
             wallet.write().await.add_off_chain_transaction(&transaction)
