@@ -21,7 +21,7 @@ use futures::{SinkExt, StreamExt, TryFutureExt};
 use mongodb::{
     bson::{doc, oid::ObjectId},
     options::ClientOptions,
-    sync::{Client, Database},
+    sync::{Client, Collection, Database},
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
@@ -37,6 +37,7 @@ use warp::{filters::ws::Message, Filter, Rejection, Reply};
 // here
 use crate::canvas::{Pixel, PIXEL_HASH_SIZE};
 use celestium::{
+    block_hash::BlockHash,
     ec_key_serialization::PUBLIC_KEY_COMPRESSED_SIZE,
     serialize::{DynamicSized, Serialize},
     transaction::{self, Transaction, BASE_TRANSACTION_MESSAGE_LEN},
@@ -146,6 +147,18 @@ struct StoreItem {
     // UB: String,
     // w: f64,
     store_value_in_dust: String,
+    debris_intldes: String,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DebrisItem {
+    _id: String,
+    INTLDES: String,
+    OBJECT_NAME: String,
+    OBJECT_TYPE: String,
+    TLE_LINE1: String,
+    TLE_LINE2: String,
 }
 
 #[derive(SerdeSerialize, Deserialize, Debug)]
@@ -158,11 +171,13 @@ struct GetStoreItemData {
 struct UserData {
     balance: String,
     owned_store_items: Vec<StoreItem>,
+    owned_debris: Vec<DebrisItem>,
 }
 
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 static DUST_PER_CEL: u128 = 10000000000000000000000000000000;
 static DEFAULT_MONGODB_STORE_COLLECTION_NAME: &str = "asteroids";
+static DEFAULT_MONGODB_DEBRIS_COLLECTION_NAME: &str = "debris";
 
 #[repr(u8)]
 #[derive(FromPrimitive, Debug)]
@@ -255,7 +270,7 @@ async fn main() {
     };
 
     // initialize empty canvas
-    print!("Initializing canvas...");
+    println!("Initializing canvas...");
     let mut canvas = canvas::Canvas::new_test();
     let off_chain_transactions = wallet.off_chain_transactions.clone();
 
@@ -295,7 +310,7 @@ async fn main() {
     }
     println!("Found {} acutal candidates", actual_candidates);
     let shared_canvas = Arc::new(RwLock::new(canvas));
-    println!(" Done!");
+    println!("Canvas initialized");
 
     let shared_wallet = Arc::new(RwLock::new(wallet));
 
@@ -656,6 +671,61 @@ async fn handle_ws_message(
     }
 }
 
+async fn get_or_create_nft(
+    id_hash: [u8; HASH_SIZE],
+    their_pk: PublicKey,
+    wallet: &SharedWallet,
+    padded_message: [u8; 33],
+    last_save_time: &SharedLastSavedTime,
+) -> Result<(BlockHash, TransactionHash, TransactionVarUint), String> {
+    let nft = wallet.read().await.lookup_nft(id_hash);
+    let head_hash = wallet.read().await.get_head_hash();
+    let str_message = std::str::from_utf8(
+        &padded_message[..padded_message.iter().position(|arr| arr == &0u8).unwrap()],
+    )
+    .unwrap();
+    match nft {
+        Some(n) => Ok(n),
+        None => {
+            println!(
+                "{} trying to buy \"{}\", which does not yet exist among the known already mined IDs, creating it",
+                their_pk, str_message,
+            );
+            let t = Transaction::new_id_base_transaction(
+                head_hash,
+                padded_message,
+                TransactionOutput::new(TransactionValue::new_id_transfer(id_hash)?, their_pk),
+            )?;
+            // We have to drop the wallet lock while mining,
+            // so other clients can still use the server
+
+            println!("Starting mining NFT for \"{}\"...", str_message);
+            let start = Instant::now();
+            let t = Wallet::mine_transaction(
+                DEFAULT_N_THREADS,
+                DEFAULT_PAR_WORK,
+                t,
+                &ThreadPoolBuilder::new()
+                    .num_threads(DEFAULT_N_THREADS as usize)
+                    .build()
+                    .unwrap(),
+            )?;
+            println!(
+                "Mining of NFT {} done, took {:?}",
+                str_message,
+                start.elapsed()
+            );
+
+            // Mining done and we can retake the wallet lock
+            wallet.write().await.add_off_chain_transaction(&t)?;
+
+            let n = wallet.read().await.lookup_nft(id_hash).unwrap();
+            save_wallet(&wallet, &last_save_time).await?;
+            Ok(n)
+        }
+    }
+}
+
 async fn parse_buy_store_item(
     bin_parameters: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
@@ -677,18 +747,45 @@ async fn parse_buy_store_item(
     let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
         .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
     let store_collection = database.collection::<StoreItem>(&store_collection_name);
+    let debris_collection_name: String = env::var("MONGODB_DEBRIS_COLLECTION_NAME")
+        .unwrap_or(DEFAULT_MONGODB_DEBRIS_COLLECTION_NAME.to_string());
+    let debris_collection = database.collection::<DebrisItem>(&debris_collection_name);
+
     let item = match store_collection.find_one(doc! {"full_name": item_name.to_string()}, None) {
         Ok(Some(c)) => c,
         Err(e) => {
             ws_error!(
                 sender,
-                format!("Could not find Store Item with ID \"{}\": {}", item_name, e)
+                format!(
+                    "Could not find Store Item with full_name \"{}\": {}",
+                    item_name, e
+                )
             );
         }
         _ => {
             ws_error!(
                 sender,
-                format!("Could not find Store Item with ID \"{}\"", item_name)
+                format!("Could not find Store Item with full_name \"{}\"", item_name)
+            );
+        }
+    };
+
+    let intldes = item.debris_intldes.as_str();
+    let debris = match debris_collection.find_one(doc! {"_id": intldes}, None) {
+        Ok(Some(c)) => c,
+        Err(e) => {
+            ws_error!(
+                sender,
+                format!(
+                    "Could not find Debris Item with INTLDES \"{}\": {}",
+                    intldes, e
+                )
+            );
+        }
+        _ => {
+            ws_error!(
+                sender,
+                format!("Could not find Debris Item with INTLDES \"{}\"", intldes)
             );
         }
     };
@@ -704,90 +801,35 @@ async fn parse_buy_store_item(
     unwrap_or_ws_error!(sender, file.read_to_end(&mut video_bytes));
     let full_name_bytes = item.full_name.as_bytes();
     let id_digest = &[full_name_bytes, &[0u8], video_bytes.as_ref()].concat();
-    let id_hash = *Sha3_256::digest(id_digest).as_ref();
+    let store_item_id_hash = *Sha3_256::digest(id_digest).as_ref();
+    let our_pk = unwrap_or_ws_error!(sender, wallet.read().await.get_pk());
 
-    // First, get ID base transaction output,
-    // since this may not have been created yet
-    // we will release wallet lock during mining
-    let head_hash = wallet.read().await.get_head_hash();
-    let our_pk = wallet.read().await.get_pk();
-    let nft_count = wallet.read().await.count_nft_lookup();
-    let nft = wallet.read().await.lookup_nft(id_hash);
-
-    let our_pk = unwrap_or_ws_error!(sender, our_pk);
-
-    let (nft_block_hash, nft_transaction_hash, nft_index) = {
-        match nft {
-            Some(n) => n,
-            None => {
-                println!(
-                    "{} trying to buy \"{}\", which does not yet exist among the known already mined {} IDs, creating it",
-                    their_pk, item.full_name, nft_count,
-                );
-                let mut padded_message = [0u8; transaction::BASE_TRANSACTION_MESSAGE_LEN];
-                padded_message[0..full_name_bytes.len()].copy_from_slice(full_name_bytes);
-                let t = unwrap_or_ws_error!(
-                    sender,
-                    Transaction::new_id_base_transaction(
-                        head_hash,
-                        padded_message,
-                        TransactionOutput::new(
-                            unwrap_or_ws_error!(sender, TransactionValue::new_id_transfer(id_hash)),
-                            our_pk
-                        ),
-                    )
-                );
-                // We have to drop the wallet lock while mining,
-                // so other clients can still use the server
-
-                println!("Starting mining NFT for \"{}\"...", item.full_name);
-                let start = Instant::now();
-                let t = unwrap_or_ws_error!(
-                    sender,
-                    Wallet::mine_transaction(
-                        DEFAULT_N_THREADS,
-                        DEFAULT_PAR_WORK,
-                        t,
-                        unwrap_or_ws_error!(
-                            sender,
-                            &ThreadPoolBuilder::new()
-                                .num_threads(DEFAULT_N_THREADS as usize)
-                                .build()
-                        ),
-                    )
-                );
-                println!(
-                    "Mining of NFT {} done, took {:?}",
-                    item.full_name,
-                    start.elapsed()
-                );
-
-                // Mining done and we can retake the wallet lock
-                unwrap_or_ws_error!(sender, wallet.write().await.add_off_chain_transaction(&t));
-
-                unwrap_or_ws_error!(
-                    sender,
-                    store_collection.update_one(
-                        doc! {"_id": item._id},
-                        doc! {"$set": {"id_hash": hex::encode(id_hash)}},
-                        None,
-                    )
-                );
-
-                let n = wallet.read().await.lookup_nft(id_hash).unwrap();
-                unwrap_or_ws_error!(sender, save_wallet(&wallet, last_save_time).await);
-                n
-            }
-        }
-    };
+    let mut padded_message = [0u8; transaction::BASE_TRANSACTION_MESSAGE_LEN];
+    padded_message[0..full_name_bytes.len()].copy_from_slice(full_name_bytes);
+    let (store_item_nft_block_hash, store_item_nft_transaction_hash, store_item_nft_index) = unwrap_or_ws_error!(
+        sender,
+        get_or_create_nft(
+            store_item_id_hash,
+            their_pk,
+            wallet,
+            padded_message,
+            last_save_time,
+        )
+        .await
+    );
+    store_collection.update_one(
+        doc! {"_id": item._id},
+        doc! {"$set": {"id_hash": hex::encode(store_item_id_hash)}},
+        None,
+    );
 
     match wallet.read().await.unspent_outputs.get(&our_pk) {
         Some(our_unspent_outputs) => {
             if our_unspent_outputs
                 .get(&(
-                    nft_block_hash.clone(),
-                    nft_transaction_hash.clone(),
-                    nft_index.clone(),
+                    store_item_nft_block_hash.clone(),
+                    store_item_nft_transaction_hash.clone(),
+                    store_item_nft_index.clone(),
                 ))
                 .is_none()
             {
@@ -799,7 +841,46 @@ async fn parse_buy_store_item(
         }
     }
 
-    // Create the transaction to transfer ID to client and value to us
+    let intldes_bytes = debris.INTLDES.as_bytes();
+    let intldes_hash = *Sha3_256::digest(intldes_bytes).as_ref();
+    let mut padded_message = [0u8; transaction::BASE_TRANSACTION_MESSAGE_LEN];
+    padded_message[..intldes_bytes.len()].copy_from_slice(intldes_bytes);
+    let (debris_nft_block_hash, debris_nft_transaction_hash, debris_nft_index) = unwrap_or_ws_error!(
+        sender,
+        get_or_create_nft(
+            intldes_hash,
+            their_pk,
+            wallet,
+            padded_message,
+            last_save_time
+        )
+        .await
+    );
+    debris_collection.update_one(
+        doc! {"_id": debris._id},
+        doc! {"$set": {"id_hash": hex::encode(intldes_hash)}},
+        None,
+    );
+
+    match wallet.read().await.unspent_outputs.get(&our_pk) {
+        Some(our_unspent_outputs) => {
+            if our_unspent_outputs
+                .get(&(
+                    debris_nft_block_hash.clone(),
+                    debris_nft_transaction_hash.clone(),
+                    debris_nft_index.clone(),
+                ))
+                .is_none()
+            {
+                ws_error!(sender, "Debris NFT not owned by us");
+            };
+        }
+        None => {
+            ws_error!(sender, "Debris NFT not owned by us");
+        }
+    }
+
+    // Create the transaction to Store Item and Debris to client and value to us
     let transaction = {
         let value = unwrap_or_ws_error!(
             sender,
@@ -846,18 +927,37 @@ async fn parse_buy_store_item(
         }
 
         inputs.push(TransactionInput::new(
-            nft_block_hash,
-            nft_transaction_hash,
-            nft_index,
+            store_item_nft_block_hash,
+            store_item_nft_transaction_hash,
+            store_item_nft_index,
+        ));
+        inputs.push(TransactionInput::new(
+            debris_nft_block_hash,
+            debris_nft_transaction_hash,
+            debris_nft_index,
         ));
 
         outputs.push(TransactionOutput::new(
-            unwrap_or_ws_error!(sender, TransactionValue::new_id_transfer(id_hash)),
+            unwrap_or_ws_error!(
+                sender,
+                TransactionValue::new_id_transfer(store_item_id_hash)
+            ),
+            their_pk,
+        ));
+        outputs.push(TransactionOutput::new(
+            unwrap_or_ws_error!(sender, TransactionValue::new_id_transfer(intldes_hash)),
             their_pk,
         ));
 
         let mut transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
 
+        unwrap_or_ws_error!(
+            sender,
+            transaction.sign(
+                wallet.read().await.get_sk().unwrap(),
+                transaction.count_inputs() - 2,
+            )
+        );
         unwrap_or_ws_error!(
             sender,
             transaction.sign(
@@ -878,7 +978,7 @@ async fn parse_buy_store_item(
     );
     if !sender.is_closed() {
         if let Err(e) = sender.send(Message::binary(response_data)) {
-            println!("Could not send store item: {}", e);
+            println!("Could not send buy store item transactions: {}", e);
         }
     } else {
         println!(
@@ -961,35 +1061,37 @@ async fn parse_get_user_data(
         hex::encode(their_pk.serialize())
     );
 
-    let user_data = {
-        let (balance, owned_ids) =
-            unwrap_or_ws_error!(sender, wallet.read().await.get_balance(their_pk));
+    let (balance, owned_ids) =
+        unwrap_or_ws_error!(sender, wallet.read().await.get_balance(their_pk));
 
-        println!("Balance: {} | Owned ids: {}", balance, owned_ids.len());
+    println!("Balance: {} | Owned ids: {}", balance, owned_ids.len());
 
-        let mut user_data = UserData {
-            balance: balance.to_string(),
-            owned_store_items: Vec::new(),
-        };
+    let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
+        .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
+    let store_collection = database.collection::<StoreItem>(&store_collection_name);
+    let debris_collection_name: String = env::var("MONGODB_DEBRIS_COLLECTION_NAME")
+        .unwrap_or(DEFAULT_MONGODB_DEBRIS_COLLECTION_NAME.to_string());
+    let debris_collection = database.collection::<DebrisItem>(&debris_collection_name);
 
-        let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
-            .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
-        let store_collection = database.collection::<StoreItem>(&store_collection_name);
+    let owned_ids: Vec<String> = owned_ids
+        .iter()
+        .map(|id| hex::encode(id.get_id().unwrap()))
+        .collect();
 
-        let mut lookup_ids = Vec::new();
-        for owned_id in owned_ids {
-            lookup_ids.push(hex::encode(unwrap_or_ws_error!(sender, owned_id.get_id())));
-        }
-        for item in store_collection
-            .find(doc! {"id_hash": {"$in": lookup_ids}}, None)
+    let user_data = UserData {
+        balance: balance.to_string(),
+        owned_store_items: store_collection
+            .find(doc! {"id_hash": {"$in": &owned_ids}}, None)
             .into_iter()
             .flatten()
             .flatten()
-        {
-            user_data.owned_store_items.push(item);
-        }
-
-        user_data
+            .collect(),
+        owned_debris: debris_collection
+            .find(doc! {"_id": {"$in": &owned_ids}}, None)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect(),
     };
 
     let json = unwrap_or_ws_error!(sender, serde_json::to_string(&user_data));
@@ -1163,7 +1265,7 @@ async fn parse_transaction(
         );
 
         let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
-            .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
+            .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
         let store_collection = database.collection::<StoreItem>(&store_collection_name);
 
         for o in transaction.get_outputs() {
