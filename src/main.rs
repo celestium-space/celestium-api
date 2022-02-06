@@ -21,7 +21,7 @@ use futures::{SinkExt, StreamExt, TryFutureExt};
 use mongodb::{
     bson::{doc, oid::ObjectId},
     options::ClientOptions,
-    sync::{Client, Collection, Database},
+    sync::{Client, Database},
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
@@ -673,13 +673,13 @@ async fn handle_ws_message(
 
 async fn get_or_create_nft(
     id_hash: [u8; HASH_SIZE],
-    their_pk: PublicKey,
     wallet: &SharedWallet,
     padded_message: [u8; 33],
     last_save_time: &SharedLastSavedTime,
 ) -> Result<(BlockHash, TransactionHash, TransactionVarUint), String> {
     let nft = wallet.read().await.lookup_nft(id_hash);
     let head_hash = wallet.read().await.get_head_hash();
+    let our_pk = wallet.read().await.get_pk().unwrap();
     let str_message = std::str::from_utf8(
         &padded_message[..padded_message.iter().position(|arr| arr == &0u8).unwrap()],
     )
@@ -688,13 +688,13 @@ async fn get_or_create_nft(
         Some(n) => Ok(n),
         None => {
             println!(
-                "{} trying to buy \"{}\", which does not yet exist among the known already mined IDs, creating it",
-                their_pk, str_message,
+                "Trying to buy \"{}\", which does not yet exist among the known already mined IDs, creating it",
+                str_message,
             );
             let t = Transaction::new_id_base_transaction(
                 head_hash,
                 padded_message,
-                TransactionOutput::new(TransactionValue::new_id_transfer(id_hash)?, their_pk),
+                TransactionOutput::new(TransactionValue::new_id_transfer(id_hash)?, our_pk),
             )?;
             // We have to drop the wallet lock while mining,
             // so other clients can still use the server
@@ -808,19 +808,15 @@ async fn parse_buy_store_item(
     padded_message[0..full_name_bytes.len()].copy_from_slice(full_name_bytes);
     let (store_item_nft_block_hash, store_item_nft_transaction_hash, store_item_nft_index) = unwrap_or_ws_error!(
         sender,
-        get_or_create_nft(
-            store_item_id_hash,
-            their_pk,
-            wallet,
-            padded_message,
-            last_save_time,
-        )
-        .await
+        get_or_create_nft(store_item_id_hash, wallet, padded_message, last_save_time,).await
     );
-    store_collection.update_one(
-        doc! {"_id": item._id},
-        doc! {"$set": {"id_hash": hex::encode(store_item_id_hash)}},
-        None,
+    unwrap_or_ws_error!(
+        sender,
+        store_collection.update_one(
+            doc! {"_id": item._id},
+            doc! {"$set": {"id_hash": hex::encode(store_item_id_hash)}},
+            None,
+        )
     );
 
     match wallet.read().await.unspent_outputs.get(&our_pk) {
@@ -847,19 +843,15 @@ async fn parse_buy_store_item(
     padded_message[..intldes_bytes.len()].copy_from_slice(intldes_bytes);
     let (debris_nft_block_hash, debris_nft_transaction_hash, debris_nft_index) = unwrap_or_ws_error!(
         sender,
-        get_or_create_nft(
-            intldes_hash,
-            their_pk,
-            wallet,
-            padded_message,
-            last_save_time
-        )
-        .await
+        get_or_create_nft(intldes_hash, wallet, padded_message, last_save_time).await
     );
-    debris_collection.update_one(
-        doc! {"_id": debris._id},
-        doc! {"$set": {"id_hash": hex::encode(intldes_hash)}},
-        None,
+    unwrap_or_ws_error!(
+        sender,
+        debris_collection.update_one(
+            doc! {"_id": debris._id},
+            doc! {"$set": {"id_hash": hex::encode(intldes_hash)}},
+            None,
+        )
     );
 
     match wallet.read().await.unspent_outputs.get(&our_pk) {
@@ -969,12 +961,16 @@ async fn parse_buy_store_item(
         transaction
     };
 
-    let mut response_data = vec![0u8; transaction.serialized_len() + 1];
-    response_data[0] = CMDOpcodes::UnminedTransaction as u8;
+    let debris_name_bytes = debris.OBJECT_NAME.as_bytes();
 
+    let mut response_data = vec![0u8; transaction.serialized_len() + debris_name_bytes.len() + 2];
+    response_data[0] = CMDOpcodes::UnminedTransaction as u8;
+    let mut i = 1;
+    response_data[i..i + debris_name_bytes.len()].copy_from_slice(&debris_name_bytes);
+    i += debris_name_bytes.len() + 1;
     unwrap_or_ws_error!(
         sender,
-        transaction.serialize_into(&mut response_data, &mut 1)
+        transaction.serialize_into(&mut response_data, &mut i)
     );
     if !sender.is_closed() {
         if let Err(e) = sender.send(Message::binary(response_data)) {
@@ -1087,7 +1083,7 @@ async fn parse_get_user_data(
             .flatten()
             .collect(),
         owned_debris: debris_collection
-            .find(doc! {"_id": {"$in": &owned_ids}}, None)
+            .find(doc! {"id_hash": {"$in": &owned_ids}}, None)
             .into_iter()
             .flatten()
             .flatten()
