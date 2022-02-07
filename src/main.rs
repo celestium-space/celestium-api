@@ -147,6 +147,7 @@ struct StoreItem {
     // UB: String,
     // w: f64,
     store_value_in_dust: String,
+    id_hash: String,
     debris_intldes: String,
 }
 
@@ -253,7 +254,6 @@ async fn main() {
         "MongoDB Connected successfully, collections: {:?}",
         database.list_collection_names(doc! {}).unwrap()
     );
-    let database = warp::any().map(move || database.clone());
 
     // initialize wallet
     let wallet = match load_wallet() {
@@ -324,6 +324,64 @@ async fn main() {
 
     let last_save_time = Arc::new(Mutex::new(Utc::now().timestamp()));
 
+    // let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
+    //     .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
+    // let store_collection = database.collection::<StoreItem>(&store_collection_name);
+
+    // for item in store_collection
+    //     .find(doc! {"state": "bought"}, None)
+    //     .unwrap()
+    //     .flatten()
+    // {
+    //     println!("FUN: {}", item.full_name);
+    //     let mut debris_id_hash = [0u8; HASH_SIZE];
+    //     debris_id_hash.copy_from_slice(&Sha3_256::digest(item.debris_intldes.as_bytes()));
+    //     if shared_wallet
+    //         .read()
+    //         .await
+    //         .lookup_nft(debris_id_hash)
+    //         .is_none()
+    //     {
+    //         let mut asteroid_id_hash = [0u8; HASH_SIZE];
+    //         let mut their_pk = None;
+    //         asteroid_id_hash.copy_from_slice(&hex::decode(item.id_hash).unwrap());
+
+    //         let asteroid_key = shared_wallet
+    //             .read()
+    //             .await
+    //             .lookup_nft(asteroid_id_hash)
+    //             .unwrap();
+    //         for (pk, pk_hashes) in shared_wallet.read().await.unspent_outputs.clone() {
+    //             let to = pk_hashes.get(&asteroid_key).unwrap();
+    //             let id = to.value.get_id().unwrap();
+    //             if id == asteroid_id_hash {
+    //                 their_pk = Some(pk);
+    //                 break;
+    //             }
+    //         }
+
+    //         let mut padded_message = [0u8; transaction::BASE_TRANSACTION_MESSAGE_LEN];
+    //         padded_message[0..debris_id_hash.len()].copy_from_slice(&debris_id_hash);
+    //         let (block_hash, transaction_hash, index) = get_or_create_nft(
+    //             debris_id_hash,
+    //             &shared_wallet,
+    //             padded_message,
+    //             &last_save_time,
+    //         )
+    //         .await
+    //         .unwrap();
+    //         let transaction = Transaction::new(
+    //             vec![TransactionInput::new(block_hash, transaction_hash, index)],
+    //             vec![TransactionOutput::new(
+    //                 TransactionValue::new_id_transfer(debris_id_hash).unwrap(),
+    //                 their_pk.unwrap(),
+    //             )],
+    //         );
+    //     }
+    // }
+
+    let database = warp::any().map(move || database.clone());
+
     // configure ws route
     let ws_route = warp::path::end()
         .and(warp::ws())
@@ -373,6 +431,7 @@ fn load_wallet() -> Result<Wallet, String> {
             off_chain_transactions_bin: load("off_chain_transactions")?,
         },
         env::var("RELOAD_UNSPENT_OUTPUTS").is_ok(),
+        env::var("RELOAD_NFT_LOOKUPS").is_ok(),
         env::var("IGNORE_OFF_CHAIN_TRANSACTIONS").is_ok(),
     )
 }
@@ -674,7 +733,7 @@ async fn handle_ws_message(
 async fn get_or_create_nft(
     id_hash: [u8; HASH_SIZE],
     wallet: &SharedWallet,
-    padded_message: [u8; 33],
+    padded_message: [u8; transaction::BASE_TRANSACTION_MESSAGE_LEN],
     last_save_time: &SharedLastSavedTime,
 ) -> Result<(BlockHash, TransactionHash, TransactionVarUint), String> {
     let nft = wallet.read().await.lookup_nft(id_hash);
@@ -1057,10 +1116,15 @@ async fn parse_get_user_data(
         hex::encode(their_pk.serialize())
     );
 
-    let (balance, owned_ids) =
+    let (balance, owned_base_ids, owned_transferred_ids) =
         unwrap_or_ws_error!(sender, wallet.read().await.get_balance(their_pk));
 
-    println!("Balance: {} | Owned ids: {}", balance, owned_ids.len());
+    println!(
+        "Balance: {} | Owned base ids: {} | Owned transferred ids: {}",
+        balance,
+        owned_base_ids.len(),
+        owned_transferred_ids.len()
+    );
 
     let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
         .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
@@ -1069,10 +1133,17 @@ async fn parse_get_user_data(
         .unwrap_or(DEFAULT_MONGODB_DEBRIS_COLLECTION_NAME.to_string());
     let debris_collection = database.collection::<DebrisItem>(&debris_collection_name);
 
-    let owned_ids: Vec<String> = owned_ids
-        .iter()
-        .map(|id| hex::encode(id.get_id().unwrap()))
-        .collect();
+    let owned_ids: Vec<String> = [
+        owned_base_ids
+            .iter()
+            .map(|id| hex::encode(id.get_id().unwrap()))
+            .collect::<Vec<String>>(),
+        owned_transferred_ids
+            .iter()
+            .map(|id| hex::encode(id.get_id().unwrap()))
+            .collect::<Vec<String>>(),
+    ]
+    .concat();
 
     let user_data = UserData {
         balance: balance.to_string(),
