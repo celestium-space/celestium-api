@@ -147,7 +147,7 @@ struct StoreItem {
     // UB: String,
     // w: f64,
     store_value_in_dust: String,
-    id_hash: String,
+    id_hash: Option<String>,
     debris_intldes: String,
 }
 
