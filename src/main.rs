@@ -1451,21 +1451,35 @@ async fn parse_transaction(
             ws_error!(
                 sender,
                 format!(
-                    "Got wrong pixel hash expected {:x?} got {:x?}",
+                    "Got wrong pixel back hash, expected {:x?} got {:x?}",
                     current_pixel_hash, new_pixel_back_ref_hash,
                 )
             );
-        } else {
-            unwrap_or_ws_error!(sender, canvas.write().await.set_pixel(x, y, pixel));
+        }
 
-            let mut update_pixel_binary_message = [0u8; 6];
-            update_pixel_binary_message[0] = CMDOpcodes::UpdatePixel as u8;
-            update_pixel_binary_message[1..]
-                .copy_from_slice(&base_transaction_message[PIXEL_HASH_SIZE..]);
-            for tx in clients.read().await.values() {
-                if let Err(e) = tx.send(Message::binary(update_pixel_binary_message)) {
-                    println!("Could not send updated pixel: {}", e);
-                }
+        let pixel_transaction_id = unwrap_or_ws_error!(sender, pixel_transaction.get_id());
+        let mut expected_pixel_hash = [0u8; HASH_SIZE];
+        expected_pixel_hash.copy_from_slice(&Sha3_256::digest(&base_transaction_message));
+        if pixel_transaction_id != expected_pixel_hash {
+            ws_error!(
+                sender,
+                format!(
+                    "Got wrong pixel transaction id, expected {} got {}",
+                    hex::encode(expected_pixel_hash),
+                    hex::encode(pixel_transaction_id)
+                )
+            );
+        }
+
+        unwrap_or_ws_error!(sender, canvas.write().await.set_pixel(x, y, pixel));
+
+        let mut update_pixel_binary_message = [0u8; 6];
+        update_pixel_binary_message[0] = CMDOpcodes::UpdatePixel as u8;
+        update_pixel_binary_message[1..]
+            .copy_from_slice(&base_transaction_message[PIXEL_HASH_SIZE..]);
+        for tx in clients.read().await.values() {
+            if let Err(e) = tx.send(Message::binary(update_pixel_binary_message)) {
+                println!("Could not send updated pixel: {}", e);
             }
         }
 
