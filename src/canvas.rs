@@ -3,7 +3,7 @@ use celestium::transaction::BASE_TRANSACTION_MESSAGE_LEN;
 use sha3::{Digest, Sha3_224};
 
 pub(crate) const PIXEL_HASH_SIZE: usize = 28;
-const NUM_COLORS: u8 = 16;
+const NUM_COLORS: u8 = 56;
 const WIDTH: usize = 1000;
 const HEIGHT: usize = 1000;
 
