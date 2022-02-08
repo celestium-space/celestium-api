@@ -65,25 +65,25 @@ async def main():
         print(f"Canvas: {r[:50]}")
 
         # mine a pixel
-        px, py, c = 0, 0, 0
+        px, py, c = 0, 0, 14
 
         # get previous pixel hash
-        print("Sending request for pixel hash")
-        await ws.send(
-            bytes([Ops.get_pixel.value])
-            + struct.pack("HH", px, py)
-            + pubkey
-        )
+        req = bytes([Ops.get_pixel.value]) + px.to_bytes(2, "big") + py.to_bytes(2, "big") + pubkey
+        print(f"Sending request for pixel hash: {req=}")
+        await ws.send(req)
+
         print("Waiting for pixel hash response...")
-        while not (r := await ws.recv()).startswith(bytes([Ops.got_pixel.value])):
+        while True:
+            r = await ws.recv()
+            if isinstance(r, str):
+                print("Error: " + r)
+                quit(1)
+            if r.startswith(bytes([Ops.got_pixel.value])):
+                print("Got pixel response")
+                break
             print(f"Ignoring opcode: {r[0]}")
-            pass
-        if isinstance(r, str):
-            print("Error: " + r)
-            quit(1)
 
         # parse previous pixel hash stuff
-        # assert len(r) == 328, f"Got len: {len(r)} expected 328" what is actual len?
         print(f"Pixel len is {len(r)}")
         assert r[0] == Ops.got_pixel.value, f"Unexpected opcode: {r[0:50]}"
 
