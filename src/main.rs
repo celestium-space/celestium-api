@@ -1,4 +1,5 @@
 use chrono::Utc;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
@@ -46,7 +47,10 @@ use celestium::{
     transaction_output::TransactionOutput,
     transaction_value::TransactionValue,
     transaction_varuint::TransactionVarUint,
-    wallet::{BinaryWallet, Wallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK, HASH_SIZE},
+    wallet::{
+        BinaryWallet, Wallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK, DEFAULT_PROGRESSBAR_TEMPLATE,
+        HASH_SIZE,
+    },
 };
 
 mod canvas;
@@ -160,6 +164,7 @@ struct DebrisItem {
     OBJECT_TYPE: String,
     TLE_LINE1: String,
     TLE_LINE2: String,
+    id_hash: Option<String>,
 }
 
 #[derive(SerdeSerialize, Deserialize, Debug)]
@@ -324,61 +329,84 @@ async fn main() {
 
     let last_save_time = Arc::new(Mutex::new(Utc::now().timestamp()));
 
-    // let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
-    //     .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
-    // let store_collection = database.collection::<StoreItem>(&store_collection_name);
+    let store_collection = database.collection::<StoreItem>(
+        &env::var("MONGODB_STORE_COLLECTION_NAME")
+            .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string()),
+    );
 
-    // for item in store_collection
-    //     .find(doc! {"state": "bought"}, None)
-    //     .unwrap()
-    //     .flatten()
-    // {
-    //     println!("FUN: {}", item.full_name);
-    //     let mut debris_id_hash = [0u8; HASH_SIZE];
-    //     debris_id_hash.copy_from_slice(&Sha3_256::digest(item.debris_intldes.as_bytes()));
-    //     if shared_wallet
-    //         .read()
-    //         .await
-    //         .lookup_nft(debris_id_hash)
-    //         .is_none()
-    //     {
-    //         let mut asteroid_id_hash = [0u8; HASH_SIZE];
-    //         let mut their_pk = None;
-    //         asteroid_id_hash.copy_from_slice(&hex::decode(item.id_hash).unwrap());
+    let bought_items: Vec<StoreItem> = store_collection
+        .find(doc! {"state": "bought"}, None)
+        .unwrap()
+        .flatten()
+        .collect();
 
-    //         let asteroid_key = shared_wallet
-    //             .read()
-    //             .await
-    //             .lookup_nft(asteroid_id_hash)
-    //             .unwrap();
-    //         for (pk, pk_hashes) in shared_wallet.read().await.unspent_outputs.clone() {
-    //             let to = pk_hashes.get(&asteroid_key).unwrap();
-    //             let id = to.value.get_id().unwrap();
-    //             if id == asteroid_id_hash {
-    //                 their_pk = Some(pk);
-    //                 break;
-    //             }
-    //         }
+    let our_sk = shared_wallet.read().await.get_sk().unwrap();
+    let pb = ProgressBar::with_message(
+        ProgressBar::new(bought_items.len() as u64),
+        "Creating missing debris transactions",
+    );
+    pb.set_style(ProgressStyle::default_bar().template(DEFAULT_PROGRESSBAR_TEMPLATE));
+    for item in bought_items {
+        pb.inc(1);
+        let debris_intldes = item.debris_intldes;
+        let debris_intldes_bytes = debris_intldes.as_bytes();
+        let mut debris_id_hash = [0u8; HASH_SIZE];
+        debris_id_hash.copy_from_slice(&Sha3_256::digest(debris_intldes_bytes));
 
-    //         let mut padded_message = [0u8; transaction::BASE_TRANSACTION_MESSAGE_LEN];
-    //         padded_message[0..debris_id_hash.len()].copy_from_slice(&debris_id_hash);
-    //         let (block_hash, transaction_hash, index) = get_or_create_nft(
-    //             debris_id_hash,
-    //             &shared_wallet,
-    //             padded_message,
-    //             &last_save_time,
-    //         )
-    //         .await
-    //         .unwrap();
-    //         let transaction = Transaction::new(
-    //             vec![TransactionInput::new(block_hash, transaction_hash, index)],
-    //             vec![TransactionOutput::new(
-    //                 TransactionValue::new_id_transfer(debris_id_hash).unwrap(),
-    //                 their_pk.unwrap(),
-    //             )],
-    //         );
-    //     }
-    // }
+        let debris_nft = shared_wallet.read().await.lookup_nft(debris_id_hash);
+
+        if debris_nft.is_none() {
+            let mut asteroid_id_hash = [0u8; HASH_SIZE];
+            asteroid_id_hash.copy_from_slice(&hex::decode(item.id_hash.unwrap()).unwrap());
+            let res = shared_wallet.read().await.lookup_nft(asteroid_id_hash);
+            if let Some((their_pk, _bh, _th, _i)) = res {
+                let mut padded_message = [0u8; transaction::BASE_TRANSACTION_MESSAGE_LEN];
+                padded_message[0..debris_intldes_bytes.len()]
+                    .copy_from_slice(&debris_intldes_bytes);
+
+                let (_, block_hash, transaction_hash, index) = get_or_create_nft(
+                    debris_id_hash,
+                    &shared_wallet,
+                    padded_message,
+                    &last_save_time,
+                    false,
+                )
+                .await
+                .unwrap();
+
+                let mut transaction = Transaction::new(
+                    vec![TransactionInput::new(block_hash, transaction_hash, index)],
+                    vec![TransactionOutput::new(
+                        TransactionValue::new_id_transfer(debris_id_hash).unwrap(),
+                        their_pk,
+                    )],
+                )
+                .unwrap();
+
+                transaction.sign(our_sk, 0).unwrap();
+
+                shared_wallet
+                    .write()
+                    .await
+                    .add_off_chain_transaction(
+                        &Wallet::mine_transaction(
+                            DEFAULT_N_THREADS,
+                            DEFAULT_PAR_WORK,
+                            transaction,
+                            &ThreadPoolBuilder::new()
+                                .num_threads(DEFAULT_N_THREADS as usize)
+                                .build()
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+            } else {
+                println!("WARNING: Asteroid \"{}\" ({}) is \"bought\" but does not have a transaction on the blockchain", item.full_name, hex::encode(asteroid_id_hash));
+            }
+        }
+    }
+    pb.finish();
 
     let database = warp::any().map(move || database.clone());
 
@@ -441,6 +469,7 @@ const MIN_SAVE_INTERVAL_S: i64 = 60 * 5;
 async fn save_wallet(
     wallet: &SharedWallet,
     last_save_time: &SharedLastSavedTime,
+    verbose: bool,
 ) -> Result<(), String> {
     // write members of the wallet struct to disk
     // overwrites whatever was in the way
@@ -451,16 +480,20 @@ async fn save_wallet(
     if elapsed > MIN_SAVE_INTERVAL_S {
         *real_last_save_time = now;
     } else {
-        println!(
-            "Skipping wallet write: it has not been {}s since last write ({}s elapsed)",
-            MIN_SAVE_INTERVAL_S, elapsed
-        );
+        if verbose {
+            println!(
+                "Skipping wallet write: it has not been {}s since last write ({}s elapsed)",
+                MIN_SAVE_INTERVAL_S, elapsed
+            );
+        }
         drop(real_last_save_time);
         return Ok(());
     }
     drop(real_last_save_time);
 
-    println!("Writing wallet to disk.");
+    if verbose {
+        println!("Writing wallet to disk.");
+    }
     let dir = wallet_dir();
     let wallet_bin = wallet.read().await.to_binary()?;
     let save = |filename: &str, data: Vec<u8>| {
@@ -481,10 +514,12 @@ async fn save_wallet(
         "off_chain_transactions",
         wallet_bin.off_chain_transactions_bin,
     )??;
-    println!(
-        "Wallet written to disk, took {}s",
-        Utc::now().timestamp() - now
-    );
+    if verbose {
+        println!(
+            "Wallet written to disk, took {}s",
+            Utc::now().timestamp() - now
+        );
+    }
     Ok(())
 }
 
@@ -735,7 +770,8 @@ async fn get_or_create_nft(
     wallet: &SharedWallet,
     padded_message: [u8; transaction::BASE_TRANSACTION_MESSAGE_LEN],
     last_save_time: &SharedLastSavedTime,
-) -> Result<(BlockHash, TransactionHash, TransactionVarUint), String> {
+    verbose: bool,
+) -> Result<(PublicKey, BlockHash, TransactionHash, TransactionVarUint), String> {
     let nft = wallet.read().await.lookup_nft(id_hash);
     let head_hash = wallet.read().await.get_head_hash();
     let our_pk = wallet.read().await.get_pk().unwrap();
@@ -746,10 +782,12 @@ async fn get_or_create_nft(
     match nft {
         Some(n) => Ok(n),
         None => {
-            println!(
+            if verbose {
+                println!(
                 "Trying to buy \"{}\", which does not yet exist among the known already mined IDs, creating it",
                 str_message,
             );
+            }
             let t = Transaction::new_id_base_transaction(
                 head_hash,
                 padded_message,
@@ -758,7 +796,9 @@ async fn get_or_create_nft(
             // We have to drop the wallet lock while mining,
             // so other clients can still use the server
 
-            println!("Starting mining NFT for \"{}\"...", str_message);
+            if verbose {
+                println!("Starting mining NFT for \"{}\"...", str_message);
+            }
             let start = Instant::now();
             let t = Wallet::mine_transaction(
                 DEFAULT_N_THREADS,
@@ -769,17 +809,19 @@ async fn get_or_create_nft(
                     .build()
                     .unwrap(),
             )?;
-            println!(
-                "Mining of NFT {} done, took {:?}",
-                str_message,
-                start.elapsed()
-            );
+            if verbose {
+                println!(
+                    "Mining of NFT {} done, took {:?}",
+                    str_message,
+                    start.elapsed()
+                );
+            }
 
             // Mining done and we can retake the wallet lock
             wallet.write().await.add_off_chain_transaction(&t)?;
 
             let n = wallet.read().await.lookup_nft(id_hash).unwrap();
-            save_wallet(&wallet, &last_save_time).await?;
+            save_wallet(&wallet, &last_save_time, verbose).await?;
             Ok(n)
         }
     }
@@ -865,9 +907,16 @@ async fn parse_buy_store_item(
 
     let mut padded_message = [0u8; transaction::BASE_TRANSACTION_MESSAGE_LEN];
     padded_message[0..full_name_bytes.len()].copy_from_slice(full_name_bytes);
-    let (store_item_nft_block_hash, store_item_nft_transaction_hash, store_item_nft_index) = unwrap_or_ws_error!(
+    let (_pk, store_item_nft_block_hash, store_item_nft_transaction_hash, store_item_nft_index) = unwrap_or_ws_error!(
         sender,
-        get_or_create_nft(store_item_id_hash, wallet, padded_message, last_save_time,).await
+        get_or_create_nft(
+            store_item_id_hash,
+            wallet,
+            padded_message,
+            last_save_time,
+            true
+        )
+        .await
     );
     unwrap_or_ws_error!(
         sender,
@@ -900,9 +949,9 @@ async fn parse_buy_store_item(
     let intldes_hash = *Sha3_256::digest(intldes_bytes).as_ref();
     let mut padded_message = [0u8; transaction::BASE_TRANSACTION_MESSAGE_LEN];
     padded_message[..intldes_bytes.len()].copy_from_slice(intldes_bytes);
-    let (debris_nft_block_hash, debris_nft_transaction_hash, debris_nft_index) = unwrap_or_ws_error!(
+    let (_pk, debris_nft_block_hash, debris_nft_transaction_hash, debris_nft_index) = unwrap_or_ws_error!(
         sender,
-        get_or_create_nft(intldes_hash, wallet, padded_message, last_save_time).await
+        get_or_create_nft(intldes_hash, wallet, padded_message, last_save_time, true).await
     );
     unwrap_or_ws_error!(
         sender,
@@ -1450,5 +1499,5 @@ async fn parse_transaction(
         );
     }
 
-    unwrap_or_ws_error!(sender, save_wallet(&wallet, last_save_time).await);
+    unwrap_or_ws_error!(sender, save_wallet(&wallet, last_save_time, true).await);
 }
