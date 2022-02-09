@@ -279,41 +279,64 @@ async fn main() {
     let mut canvas = canvas::Canvas::new_test();
     let off_chain_transactions = wallet.off_chain_transactions.clone();
 
-    let mut to_throw_away: HashSet<[u8; PIXEL_HASH_SIZE]> = HashSet::new();
-    let mut candidates: HashMap<[u8; PIXEL_HASH_SIZE], (u16, u16, Pixel)> = HashMap::new();
-    for (_, transaction) in off_chain_transactions {
-        if transaction.is_id_base_transaction() {
-            match canvas::Canvas::parse_pixel(transaction.get_base_transaction_message().unwrap()) {
-                Ok((x, y, pixel)) => {
-                    to_throw_away.insert(pixel.back_hash);
-                    if candidates.remove(&pixel.back_hash).is_some() {
-                        to_throw_away.insert(pixel.back_hash);
-                    }
-                    let hash: [u8; PIXEL_HASH_SIZE] = pixel.hash(x as u16, y as u16);
-                    if !to_throw_away.contains(&hash) {
-                        candidates.insert(hash, (x as u16, y as u16, pixel));
-                    }
-                }
-                Err(e) => {
-                    println!(
-                        "WARNING: Could not decode one transaction base message: {}",
-                        e
-                    );
-                }
+    let pb = ProgressBar::with_message(
+        ProgressBar::new(off_chain_transactions.len() as u64),
+        "Loading candidates from off chain transactions",
+    );
+    pb.set_style(ProgressStyle::default_bar().template(DEFAULT_PROGRESSBAR_TEMPLATE));
+    let mut candidates: HashMap<(u16, u16), HashMap<[u8; PIXEL_HASH_SIZE], (u16, u16, Pixel)>> =
+        HashMap::new();
+    for (_, transaction) in &off_chain_transactions {
+        pb.inc(1);
+        if let Ok(base_message) = transaction.get_base_transaction_message() {
+            if let Ok((x, y, pixel)) = canvas::Canvas::parse_pixel(base_message) {
+                let a = candidates
+                    .entry((x as u16, y as u16))
+                    .or_insert_with(HashMap::new);
+                a.insert(pixel.hash(x as u16, y as u16), (x as u16, y as u16, pixel));
             }
         }
     }
-    println!("Found {} initial candidates", candidates.len());
-    let mut actual_candidates = 0usize;
-    for (x, y, p) in candidates.values() {
-        if to_throw_away.contains(&p.back_hash) || p.back_hash.is_empty() {
-            actual_candidates += 1;
+    pb.finish();
+
+    let pb = ProgressBar::with_message(
+        ProgressBar::new(candidates.len() as u64),
+        "Processing candidates",
+    );
+    pb.set_style(ProgressStyle::default_bar().template(DEFAULT_PROGRESSBAR_TEMPLATE));
+    let mut total_set_pixels_unique = 0;
+    let mut total_set_pixels = 0;
+    for candidates in candidates.values() {
+        pb.inc(1);
+        let mut longest_candidate = (None, 0);
+        for value in candidates.values() {
+            if let Ok(init_pixel) = canvas.get_pixel(value.0 as usize, value.1 as usize) {
+                let mut len = 1;
+                let mut back_item = value;
+                while let Some(tmp_back_item) = candidates.get(&back_item.2.back_hash) {
+                    back_item = tmp_back_item;
+                    len += 1;
+                }
+                if len > longest_candidate.1
+                    && back_item.2.back_hash == init_pixel.hash(value.0, value.1)
+                {
+                    longest_candidate = (Some(value), len);
+                }
+            }
+        }
+        if let (Some((x, y, p)), len) = longest_candidate {
+            total_set_pixels_unique += 1;
+            total_set_pixels += len;
             canvas
-                .set_pixel((*x).into(), (*y).into(), p.clone())
+                .set_pixel(*x as usize, *y as usize, p.clone())
                 .unwrap();
         }
     }
-    println!("Found {} acutal candidates", actual_candidates);
+    pb.finish();
+    println!(
+        "Found {} unique pixels out of {} total set",
+        total_set_pixels_unique, total_set_pixels
+    );
     let shared_canvas = Arc::new(RwLock::new(canvas));
     println!("Canvas initialized");
 
