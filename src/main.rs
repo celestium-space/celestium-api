@@ -41,7 +41,7 @@ use celestium::{
     block_hash::BlockHash,
     ec_key_serialization::PUBLIC_KEY_COMPRESSED_SIZE,
     serialize::{DynamicSized, Serialize},
-    transaction::{self, Transaction, BASE_TRANSACTION_MESSAGE_LEN},
+    transaction::{self, Transaction},
     transaction_hash::TransactionHash,
     transaction_input::TransactionInput,
     transaction_output::TransactionOutput,
@@ -1391,18 +1391,72 @@ async fn parse_transaction(
     clients: &WSClients,
     last_save_time: &SharedLastSavedTime,
 ) {
+    println!("Got a transaction");
+
     let mut i = 0;
-    let transaction_count = *unwrap_or_ws_error!(
+    let transaction = unwrap_or_ws_error!(
         sender,
-        TransactionVarUint::from_serialized(bin_transaction, &mut i)
+        Transaction::from_serialized(bin_transaction, &mut i)
     );
-    if transaction_count.get_value() == 1 {
-        println!("Got 1 transaction");
-        let transaction = unwrap_or_ws_error!(
+    unwrap_or_ws_error!(
+        sender,
+        wallet
+            .read()
+            .await
+            .verify_off_chain_transaction(&transaction)
+    );
+
+    if let Ok(base_transaction_message) = transaction.get_base_transaction_message() {
+        let (x, y, pixel) = unwrap_or_ws_error!(
             sender,
-            Transaction::from_serialized(bin_transaction, &mut i)
+            canvas::Canvas::parse_pixel(base_transaction_message)
         );
 
+        let current_pixel_hash = unwrap_or_ws_error!(sender, canvas.read().await.get_pixel(x, y))
+            .hash(x as u16, y as u16)
+            .to_vec();
+        let new_pixel_back_ref_hash = base_transaction_message[..PIXEL_HASH_SIZE].to_vec();
+        if current_pixel_hash != new_pixel_back_ref_hash {
+            ws_error!(
+                sender,
+                format!(
+                    "Got wrong pixel back hash, expected {:x?} got {:x?}",
+                    current_pixel_hash, new_pixel_back_ref_hash,
+                )
+            );
+        }
+
+        let pixel_transaction_id = unwrap_or_ws_error!(sender, transaction.get_id());
+        let mut expected_pixel_hash = [0u8; HASH_SIZE];
+        expected_pixel_hash.copy_from_slice(&Sha3_256::digest(&base_transaction_message));
+        if pixel_transaction_id != expected_pixel_hash {
+            ws_error!(
+                sender,
+                format!(
+                    "Got wrong pixel transaction id, expected {} got {}",
+                    hex::encode(expected_pixel_hash),
+                    hex::encode(pixel_transaction_id)
+                )
+            );
+        }
+
+        unwrap_or_ws_error!(sender, canvas.write().await.set_pixel(x, y, pixel));
+
+        unwrap_or_ws_error!(
+            sender,
+            wallet.write().await.add_off_chain_transaction(&transaction)
+        );
+
+        let mut update_pixel_binary_message = [0u8; 6];
+        update_pixel_binary_message[0] = CMDOpcodes::UpdatePixel as u8;
+        update_pixel_binary_message[1..]
+            .copy_from_slice(&base_transaction_message[PIXEL_HASH_SIZE..]);
+        for tx in clients.read().await.values() {
+            if let Err(e) = tx.send(Message::binary(update_pixel_binary_message)) {
+                println!("Could not send updated pixel: {}", e);
+            }
+        }
+    } else {
         let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
             .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
         let store_collection = database.collection::<StoreItem>(&store_collection_name);
@@ -1430,110 +1484,6 @@ async fn parse_transaction(
                 .await
                 .remove(&(input.transaction_hash, input.output_index.get_value()));
         }
-    } else if transaction_count.get_value() == 2 {
-        println!("Got 2 transactions");
-        let pixel_transaction = unwrap_or_ws_error!(
-            sender,
-            Transaction::from_serialized(bin_transaction, &mut i)
-        );
-
-        let value_transaction = unwrap_or_ws_error!(
-            sender,
-            Transaction::from_serialized(bin_transaction, &mut i)
-        );
-
-        unwrap_or_ws_error!(
-            sender,
-            wallet
-                .read()
-                .await
-                .verify_off_chain_transaction(&pixel_transaction)
-        );
-        unwrap_or_ws_error!(
-            sender,
-            wallet
-                .read()
-                .await
-                .verify_off_chain_transaction(&value_transaction)
-        );
-
-        let base_transaction_message =
-            unwrap_or_ws_error!(sender, pixel_transaction.get_base_transaction_message())
-                as [u8; BASE_TRANSACTION_MESSAGE_LEN];
-
-        let (x, y, pixel) = unwrap_or_ws_error!(
-            sender,
-            canvas::Canvas::parse_pixel(base_transaction_message)
-        );
-
-        let current_pixel_hash = unwrap_or_ws_error!(sender, canvas.read().await.get_pixel(x, y))
-            .hash(x as u16, y as u16)
-            .to_vec();
-        let new_pixel_back_ref_hash = base_transaction_message[..PIXEL_HASH_SIZE].to_vec();
-        if current_pixel_hash != new_pixel_back_ref_hash {
-            ws_error!(
-                sender,
-                format!(
-                    "Got wrong pixel back hash, expected {:x?} got {:x?}",
-                    current_pixel_hash, new_pixel_back_ref_hash,
-                )
-            );
-        }
-
-        let pixel_transaction_id = unwrap_or_ws_error!(sender, pixel_transaction.get_id());
-        let mut expected_pixel_hash = [0u8; HASH_SIZE];
-        expected_pixel_hash.copy_from_slice(&Sha3_256::digest(&base_transaction_message));
-        if pixel_transaction_id != expected_pixel_hash {
-            ws_error!(
-                sender,
-                format!(
-                    "Got wrong pixel transaction id, expected {} got {}",
-                    hex::encode(expected_pixel_hash),
-                    hex::encode(pixel_transaction_id)
-                )
-            );
-        }
-
-        unwrap_or_ws_error!(sender, canvas.write().await.set_pixel(x, y, pixel));
-
-        let mut update_pixel_binary_message = [0u8; 6];
-        update_pixel_binary_message[0] = CMDOpcodes::UpdatePixel as u8;
-        update_pixel_binary_message[1..]
-            .copy_from_slice(&base_transaction_message[PIXEL_HASH_SIZE..]);
-        for tx in clients.read().await.values() {
-            if let Err(e) = tx.send(Message::binary(update_pixel_binary_message)) {
-                println!("Could not send updated pixel: {}", e);
-            }
-        }
-
-        unwrap_or_ws_error!(
-            sender,
-            wallet
-                .write()
-                .await
-                .add_off_chain_transaction(&pixel_transaction)
-        );
-        unwrap_or_ws_error!(
-            sender,
-            wallet
-                .write()
-                .await
-                .add_off_chain_transaction(&value_transaction)
-        );
-        for input in value_transaction.get_inputs() {
-            floating_outputs
-                .write()
-                .await
-                .remove(&(input.transaction_hash, input.output_index.get_value()));
-        }
-    } else {
-        ws_error!(
-            sender,
-            format!(
-                "Transaction count expected to be 1 or 2 got {}",
-                transaction_count
-            )
-        );
     }
 
     unwrap_or_ws_error!(sender, save_wallet(&wallet, last_save_time, true).await);
