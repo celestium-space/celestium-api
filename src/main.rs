@@ -200,6 +200,7 @@ enum CMDOpcodes {
     BuyStoreItem = 0x0a,
     GetUserData = 0x0b,
     UserData = 0x0c,
+    MigrateUser = 0x0d,
 }
 
 #[tokio::main]
@@ -779,6 +780,9 @@ async fn handle_ws_message(
         Some(CMDOpcodes::GetUserData) => {
             parse_get_user_data(&binary_message[1..], &sender, wallet, database).await
         }
+        Some(CMDOpcodes::MigrateUser) => {
+            parse_migrate_user(&binary_message[1..], &sender, wallet).await
+        }
         _ => {
             ws_error!(
                 sender,
@@ -1208,11 +1212,11 @@ async fn parse_get_user_data(
     let owned_ids: Vec<String> = [
         owned_base_ids
             .iter()
-            .map(|id| hex::encode(id.get_id().unwrap()))
+            .map(|(_, value)| hex::encode(value.get_id().unwrap()))
             .collect::<Vec<String>>(),
         owned_transferred_ids
             .iter()
-            .map(|id| hex::encode(id.get_id().unwrap()))
+            .map(|(_, value)| hex::encode(value.get_id().unwrap()))
             .collect::<Vec<String>>(),
     ]
     .concat();
@@ -1246,6 +1250,68 @@ async fn parse_get_user_data(
     } else {
         println!(
             "WARNING: A connection was closed unexpectedly before being able to send user data"
+        );
+    }
+}
+
+async fn parse_migrate_user(
+    bin_parameters: &[u8],
+    sender: &mpsc::UnboundedSender<Message>,
+    wallet: &SharedWallet,
+) {
+    let mut i = 0;
+    let from_pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(bin_parameters, &mut i));
+    let to_pk = *unwrap_or_ws_error!(sender, PublicKey::from_serialized(bin_parameters, &mut i));
+
+    println!("Creating user migration transaction {}->{}", from_pk, to_pk);
+
+    let (balance, owned_base_ids, owned_transferred_ids) =
+        unwrap_or_ws_error!(sender, wallet.read().await.get_balance(from_pk));
+    let (_, mut inputs) = unwrap_or_ws_error!(
+        sender,
+        wallet.read().await.collect_for_coin_transfer(
+            &unwrap_or_ws_error!(sender, TransactionValue::new_coin_transfer(balance, 0)),
+            from_pk,
+            HashSet::new(),
+        )
+    );
+    let mut outputs = vec![TransactionOutput::new(
+        unwrap_or_ws_error!(sender, TransactionValue::new_coin_transfer(balance, 0)),
+        to_pk,
+    )];
+    for (input, value) in owned_base_ids {
+        inputs.push(input);
+        outputs.push(TransactionOutput::new(value, to_pk));
+    }
+    for (input, value) in owned_transferred_ids {
+        inputs.push(input);
+        outputs.push(TransactionOutput::new(value, to_pk));
+    }
+    let transaction = unwrap_or_ws_error!(sender, Transaction::new(inputs, outputs));
+
+    let mut unmined_transaction_response = vec![0u8; 1 + transaction.serialized_len()];
+    unmined_transaction_response[0] = CMDOpcodes::UnminedTransaction as u8;
+    unwrap_or_ws_error!(
+        sender,
+        transaction.serialize_into(&mut unmined_transaction_response, &mut 1)
+    );
+
+    if !sender.is_closed() {
+        // Send response
+        if let Err(e) = sender.send(Message::binary(unmined_transaction_response)) {
+            println!(
+                "Could not send unmined user value transferral transaction: {}",
+                e
+            );
+        };
+        println!(
+            "Sent unmined user value transferral transaction response ({})->({})",
+            transaction.count_inputs(),
+            transaction.count_outputs()
+        );
+    } else {
+        println!(
+            "WARNING: A connection was closed unexpectedly before being able to send unmined user value transferral transaction"
         );
     }
 }
@@ -1391,13 +1457,18 @@ async fn parse_transaction(
     clients: &WSClients,
     last_save_time: &SharedLastSavedTime,
 ) {
-    println!("Got a transaction");
-
     let mut i = 0;
     let transaction = unwrap_or_ws_error!(
         sender,
         Transaction::from_serialized(bin_transaction, &mut i)
     );
+
+    println!(
+        "Got a transaction ({})->({})",
+        transaction.count_inputs(),
+        transaction.count_outputs()
+    );
+
     unwrap_or_ws_error!(
         sender,
         wallet
@@ -1405,6 +1476,7 @@ async fn parse_transaction(
             .await
             .verify_off_chain_transaction(&transaction)
     );
+    println!("VER!");
 
     if let Ok(base_transaction_message) = transaction.get_base_transaction_message() {
         let (x, y, pixel) = unwrap_or_ws_error!(
@@ -1456,27 +1528,34 @@ async fn parse_transaction(
                 println!("Could not send updated pixel: {}", e);
             }
         }
+        println!("Pixel base transaction parsed");
     } else {
+        println!("NOB!");
         let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
             .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
         let store_collection = database.collection::<StoreItem>(&store_collection_name);
 
+        println!("MON!");
+        let mut hashes = Vec::new();
         for o in transaction.get_outputs() {
             if let Ok(id_hash) = o.value.get_id() {
-                unwrap_or_ws_error!(
-                    sender,
-                    store_collection.update_one(
-                        doc! {"id_hash": hex::encode(id_hash)},
-                        doc! {"$set": {"state": "bought"}},
-                        None,
-                    )
-                );
+                hashes.push(hex::encode(id_hash));
             }
         }
         unwrap_or_ws_error!(
             sender,
+            store_collection.update_many(
+                doc! {"id_hash": {"$in": hashes}},
+                doc! {"$set": {"state": "bought"}},
+                None,
+            )
+        );
+        println!("MOD!");
+        unwrap_or_ws_error!(
+            sender,
             wallet.write().await.add_off_chain_transaction(&transaction)
         );
+        println!("AOT!");
 
         for input in transaction.get_inputs() {
             floating_outputs
@@ -1484,6 +1563,7 @@ async fn parse_transaction(
                 .await
                 .remove(&(input.transaction_hash, input.output_index.get_value()));
         }
+        println!("Value transferral transaction parsed");
     }
 
     unwrap_or_ws_error!(sender, save_wallet(&wallet, last_save_time, true).await);
