@@ -1476,7 +1476,6 @@ async fn parse_transaction(
             .await
             .verify_off_chain_transaction(&transaction)
     );
-    println!("VER!");
 
     if let Ok(base_transaction_message) = transaction.get_base_transaction_message() {
         let (x, y, pixel) = unwrap_or_ws_error!(
@@ -1530,12 +1529,10 @@ async fn parse_transaction(
         }
         println!("Pixel base transaction parsed");
     } else {
-        println!("NOB!");
         let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
             .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
         let store_collection = database.collection::<StoreItem>(&store_collection_name);
 
-        println!("MON!");
         let mut hashes = Vec::new();
         for o in transaction.get_outputs() {
             if let Ok(id_hash) = o.value.get_id() {
@@ -1550,12 +1547,10 @@ async fn parse_transaction(
                 None,
             )
         );
-        println!("MOD!");
         unwrap_or_ws_error!(
             sender,
             wallet.write().await.add_off_chain_transaction(&transaction)
         );
-        println!("AOT!");
 
         for input in transaction.get_inputs() {
             floating_outputs
