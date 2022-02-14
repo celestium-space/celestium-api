@@ -26,17 +26,67 @@ color_map = [
     [0x34, 0x71, 0x15],
     [0x43, 0x27, 0x0A],
     [0x86, 0x5A, 0x48],
+    # Leet h4cker colors
+    # [0xC5, 0x00, 0x00],
+    # [0xFF, 0x40, 0x40],
+    # [0x00, 0x9E, 0x00],
+    # [0x42, 0xFE, 0x41],
+    # [0x00, 0x00, 0xCA],
+    # [0x40, 0x40, 0xFF],
+    # [0xC5, 0xB9, 0x00],
+    # [0xFF, 0xFF, 0x40],
+    # [0xDD, 0x3E, 0xD8],
+    # [0xFF, 0x9E, 0xFF],
+    # [0x00, 0xB3, 0xBD],
+    # [0x40, 0xFF, 0xFF],
+    # [0x54, 0x00, 0xAD],
+    # [0xB4, 0x55, 0xFF],
+    # [0xD3, 0xA9, 0x7D],
+    # [0xFF, 0xFF, 0xDD],
+    # [0x79, 0x79, 0x79],
+    # [0xD9, 0xD9, 0xD9],
+    # [0xC5, 0x75, 0x00],
+    # [0xFF, 0xD5, 0x40],
+    # [0x00, 0x63, 0xA7],
+    # [0x40, 0xC3, 0xFF],
+    # [0x14, 0x51, 0x00],
+    # [0x74, 0xB1, 0x55],
+    # [0x23, 0x07, 0x00],
+    # [0x83, 0x67, 0x4A],
+    # [0x66, 0x3A, 0x28],
+    # [0xC6, 0x9A, 0x88],
+    # [0x11, 0x11, 0x11],
+    # [0x22, 0x22, 0x22],
+    # [0x33, 0x33, 0x33],
+    # [0x44, 0x44, 0x44],
+    # [0x55, 0x55, 0x55],
+    # [0x66, 0x66, 0x66],
+    # [0x77, 0x77, 0x77],
+    # [0x88, 0x88, 0x88],
+    # [0xAA, 0xAA, 0xAA],
+    # [0xBB, 0xBB, 0xBB],
+    # [0xCC, 0xCC, 0xCC],
+    # [0xDD, 0xDD, 0xDD],
+    # [0xEE, 0xEE, 0xEE],
 ]
 
 
 class Ops(Enum):
-    get_canvas = 0x01
-    got_canvas = 0x02
-    update_pixel = 0x03
-    unmined_transaction = 0x04
-    mined_transaction = 0x05
-    get_pixel = 0x06
-    got_pixel = 0x07
+    get_pixel_color = 0x00
+    pixel_color = 0x01
+    get_canvas = 0x02
+    canvas = 0x03
+    updated_pixel_event = 0x04
+    unmined_transaction = 0x05
+    mined_transaction = 0x06
+    get_pixel_mining_data = 0x07
+    pixel_mining_data = 0x08
+    get_store_item = 0x09
+    store_item = 0x0A
+    buy_store_item = 0x0B
+    get_user_data = 0x0C
+    user_data = 0x0D
+    get_user_migration_transaction = 0x0E
 
 
 def load_key_pair(sk_path):
@@ -104,32 +154,29 @@ def mine(digest):
     return mb
 
 
-async def set_pixel(pk, px, py, c):
-    async with websockets.connect(
-        "wss://api.celestium.space/", ping_interval=None
-    ) as ws:
+async def set_pixel(pk, px, py, c, instance_url="wss://api.celestium.space/"):
+    async with websockets.connect(instance_url, ping_interval=None) as ws:
         # get previous pixel hash
         req = (
-            bytes([Ops.get_pixel.value])
+            bytes([Ops.get_pixel_mining_data.value])
             + px.to_bytes(2, "big")
             + py.to_bytes(2, "big")
             + pk
         )
-        # Sending request for pixel hash: {req=}")
+
+        # Sending request for pixel mining data
         await ws.send(req)
 
-        # Waiting for pixel hash response...
+        # Waiting for pixel mining data response...
         while True:
             r = await ws.recv()
             if isinstance(r, str):
-                print("Error: " + r)
+                print("Server ws error: " + r)
                 return
-            if r.startswith(bytes([Ops.got_pixel.value])):
+            if r.startswith(bytes([Ops.pixel_mining_data.value])):
                 break
 
         # parse previous pixel hash stuff
-        assert r[0] == Ops.got_pixel.value, f"Unexpected opcode: {r[0:50]}"
-
         prev_pixel_hash = r[1:29]
         assert len(prev_pixel_hash) == 28
 
@@ -175,19 +222,17 @@ async def set_pixel(pk, px, py, c):
             sha3_256(pixel_transaction).digest()
         )
 
-        # send mined transaction back to api
-        await ws.send(bs := bytes([Ops.mined_transaction.value]) + pixel_transaction)
-        r = await ws.recv()
-        if isinstance(r, str):
-            print("Error: " + r)
-
         # Mine katjing transaction in parallel
         katjing_transaction = katjing_transaction + mine(
             sha3_256(katjing_transaction).digest()
         )
 
-        # send mined transaction back to api
-        await ws.send(bs := bytes([Ops.mined_transaction.value]) + katjing_transaction)
+        # send mined transactions back to api
+        await ws.send(
+            bs := bytes([Ops.mined_transaction.value])
+            + pixel_transaction
+            + katjing_transaction
+        )
         r = await ws.recv()
         if isinstance(r, str):
-            print("Error: " + r)
+            print("Server ws error: " + r)
