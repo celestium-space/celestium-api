@@ -188,19 +188,21 @@ static DEFAULT_MONGODB_DEBRIS_COLLECTION_NAME: &str = "debris";
 #[repr(u8)]
 #[derive(FromPrimitive, Debug)]
 enum CMDOpcodes {
-    GetEntireImage = 0x01,
-    EntireImage = 0x02,
-    UpdatePixel = 0x03,
-    UnminedTransaction = 0x04,
-    MinedTransaction = 0x05,
-    GetPixelData = 0x06,
-    PixelData = 0x07,
-    GetStoreItem = 0x08,
-    StoreItem = 0x09,
-    BuyStoreItem = 0x0a,
-    GetUserData = 0x0b,
-    UserData = 0x0c,
-    MigrateUser = 0x0d,
+    GetPixelColor = 0x00,
+    PixelColor = 0x01,
+    GetEntireImage = 0x02,
+    EntireImage = 0x03,
+    UpdatedPixelEvent = 0x04,
+    UnminedTransaction = 0x05,
+    MinedTransaction = 0x06,
+    GetPixelMiningData = 0x07,
+    PixelMiningData = 0x08,
+    GetStoreItem = 0x09,
+    StoreItem = 0x0a,
+    BuyStoreItem = 0x0b,
+    GetUserData = 0x0c,
+    UserData = 0x0d,
+    GetUserMigrationTransaction = 0x0e,
 }
 
 #[tokio::main]
@@ -729,6 +731,9 @@ async fn handle_ws_message(
 
     let binary_message = message.as_bytes();
     match FromPrimitive::from_u8(binary_message[0]) {
+        Some(CMDOpcodes::GetPixelColor) => {
+            parse_get_pixel_color(&binary_message[1..], &sender, canvas).await
+        }
         Some(CMDOpcodes::GetEntireImage) => {
             let mut entire_image = canvas.read().await.serialize_colors();
 
@@ -742,7 +747,7 @@ async fn handle_ws_message(
             }
         }
         Some(CMDOpcodes::MinedTransaction) => {
-            parse_transaction(
+            parse_mined_transaction(
                 &binary_message[1..],
                 &sender,
                 wallet,
@@ -754,8 +759,8 @@ async fn handle_ws_message(
             )
             .await
         }
-        Some(CMDOpcodes::GetPixelData) => {
-            parse_get_pixel_data(
+        Some(CMDOpcodes::GetPixelMiningData) => {
+            parse_get_pixel_mining_data(
                 &binary_message[1..],
                 &sender,
                 wallet,
@@ -780,8 +785,8 @@ async fn handle_ws_message(
         Some(CMDOpcodes::GetUserData) => {
             parse_get_user_data(&binary_message[1..], &sender, wallet, database).await
         }
-        Some(CMDOpcodes::MigrateUser) => {
-            parse_migrate_user(&binary_message[1..], &sender, wallet).await
+        Some(CMDOpcodes::GetUserMigrationTransaction) => {
+            parse_get_user_migration_transaction(&binary_message[1..], &sender, wallet).await
         }
         _ => {
             ws_error!(
@@ -851,6 +856,36 @@ async fn get_or_create_nft(
             save_wallet(&wallet, &last_save_time, verbose).await?;
             Ok(n)
         }
+    }
+}
+
+async fn parse_get_pixel_color(
+    bin_parameters: &[u8],
+    sender: &mpsc::UnboundedSender<Message>,
+    canvas: &SharedCanvas,
+) {
+    if bin_parameters.len() != 4 {
+        ws_error!(
+            sender,
+            format!(
+                "Expected parameters of len 4 for CMD Opcode {:x?} (Get pixel color) got {}",
+                CMDOpcodes::GetPixelColor,
+                bin_parameters.len()
+            )
+        );
+    }
+    let x: usize = ((bin_parameters[0] as usize) << 8) + (bin_parameters[1] as usize);
+    let y: usize = ((bin_parameters[2] as usize) << 8) + (bin_parameters[3] as usize);
+    let p = unwrap_or_ws_error!(sender, canvas.read().await.get_pixel(x, y));
+    println!("Got pixel color request for ({}, {}) -> {}", x, y, p.color);
+    if !sender.is_closed() {
+        if let Err(e) = sender.send(Message::binary([CMDOpcodes::PixelColor as u8, p.color])) {
+            ws_error!(sender, format!("Error sending pixel color: {}", e));
+        }
+    } else {
+        println!(
+            "WARNING: A connection was closed unexpectedly before being able to send pixel color"
+        );
     }
 }
 
@@ -1254,7 +1289,7 @@ async fn parse_get_user_data(
     }
 }
 
-async fn parse_migrate_user(
+async fn parse_get_user_migration_transaction(
     bin_parameters: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
     wallet: &SharedWallet,
@@ -1316,7 +1351,7 @@ async fn parse_migrate_user(
     }
 }
 
-async fn parse_get_pixel_data(
+async fn parse_get_pixel_mining_data(
     bin_parameters: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
     wallet: &SharedWallet,
@@ -1329,7 +1364,7 @@ async fn parse_get_pixel_data(
             format!(
                 "Expected message len of {} for CMD Opcode {:x} (Get pixel hash) got {}",
                 5 + PUBLIC_KEY_COMPRESSED_SIZE,
-                CMDOpcodes::GetPixelData as u8,
+                CMDOpcodes::GetPixelMiningData as u8,
                 bin_parameters.len()
             )
         );
@@ -1414,7 +1449,7 @@ async fn parse_get_pixel_data(
 
     // Create response pixel data
     i = 0;
-    pixel_hash_response[i] = CMDOpcodes::PixelData as u8;
+    pixel_hash_response[i] = CMDOpcodes::PixelMiningData as u8;
     i += 1;
 
     // Add pixel hash to response
@@ -1435,7 +1470,6 @@ async fn parse_get_pixel_data(
 
     if !sender.is_closed() {
         // Send response
-        println!("Sending pixel hash response");
         if let Err(e) = sender.send(Message::binary(pixel_hash_response)) {
             println!("Could not send pixel hash: {}", e);
         };
@@ -1447,7 +1481,45 @@ async fn parse_get_pixel_data(
     }
 }
 
-async fn parse_transaction(
+async fn add_value_transferral_transaction(
+    transaction: &Transaction,
+    sender: &mpsc::UnboundedSender<Message>,
+    wallet: &SharedWallet,
+    database: &Database,
+    floating_outputs: &SharedFloatingOutputs,
+) {
+    let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
+        .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
+    let store_collection = database.collection::<StoreItem>(&store_collection_name);
+
+    let mut hashes = Vec::new();
+    for o in transaction.get_outputs() {
+        if let Ok(id_hash) = o.value.get_id() {
+            hashes.push(hex::encode(id_hash));
+        }
+    }
+    unwrap_or_ws_error!(
+        sender,
+        store_collection.update_many(
+            doc! {"id_hash": {"$in": hashes}},
+            doc! {"$set": {"state": "bought"}},
+            None,
+        )
+    );
+    unwrap_or_ws_error!(
+        sender,
+        wallet.write().await.add_off_chain_transaction(transaction)
+    );
+
+    for input in transaction.get_inputs() {
+        floating_outputs
+            .write()
+            .await
+            .remove(&(input.transaction_hash, input.output_index.get_value()));
+    }
+}
+
+async fn parse_mined_transaction(
     bin_transaction: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
     wallet: &SharedWallet,
@@ -1458,7 +1530,7 @@ async fn parse_transaction(
     last_save_time: &SharedLastSavedTime,
 ) {
     let mut i = 0;
-    let transaction = unwrap_or_ws_error!(
+    let transaction = *unwrap_or_ws_error!(
         sender,
         Transaction::from_serialized(bin_transaction, &mut i)
     );
@@ -1478,6 +1550,26 @@ async fn parse_transaction(
     );
 
     if let Ok(base_transaction_message) = transaction.get_base_transaction_message() {
+        if i >= bin_transaction.len() {
+            ws_error!(
+                sender,
+                "Pixel transaction cannot be parsed without a Katjing transaction".to_string()
+            );
+        }
+
+        let value_transferral_transaction = *unwrap_or_ws_error!(
+            sender,
+            Transaction::from_serialized(bin_transaction, &mut i)
+        );
+
+        unwrap_or_ws_error!(
+            sender,
+            wallet
+                .read()
+                .await
+                .verify_off_chain_transaction(&value_transferral_transaction)
+        );
+
         let (x, y, pixel) = unwrap_or_ws_error!(
             sender,
             canvas::Canvas::parse_pixel(base_transaction_message)
@@ -1517,9 +1609,17 @@ async fn parse_transaction(
             sender,
             wallet.write().await.add_off_chain_transaction(&transaction)
         );
+        add_value_transferral_transaction(
+            &value_transferral_transaction,
+            sender,
+            wallet,
+            database,
+            floating_outputs,
+        )
+        .await;
 
         let mut update_pixel_binary_message = [0u8; 6];
-        update_pixel_binary_message[0] = CMDOpcodes::UpdatePixel as u8;
+        update_pixel_binary_message[0] = CMDOpcodes::UpdatedPixelEvent as u8;
         update_pixel_binary_message[1..]
             .copy_from_slice(&base_transaction_message[PIXEL_HASH_SIZE..]);
         for tx in clients.read().await.values() {
@@ -1529,36 +1629,8 @@ async fn parse_transaction(
         }
         println!("Pixel base transaction parsed");
     } else {
-        let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
-            .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
-        let store_collection = database.collection::<StoreItem>(&store_collection_name);
-
-        let mut hashes = Vec::new();
-        for o in transaction.get_outputs() {
-            if let Ok(id_hash) = o.value.get_id() {
-                hashes.push(hex::encode(id_hash));
-            }
-        }
-        unwrap_or_ws_error!(
-            sender,
-            store_collection.update_many(
-                doc! {"id_hash": {"$in": hashes}},
-                doc! {"$set": {"state": "bought"}},
-                None,
-            )
-        );
-        unwrap_or_ws_error!(
-            sender,
-            wallet.write().await.add_off_chain_transaction(&transaction)
-        );
-
-        for input in transaction.get_inputs() {
-            floating_outputs
-                .write()
-                .await
-                .remove(&(input.transaction_hash, input.output_index.get_value()));
-        }
-        println!("Value transferral transaction parsed");
+        add_value_transferral_transaction(&transaction, sender, wallet, database, floating_outputs)
+            .await;
     }
 
     unwrap_or_ws_error!(sender, save_wallet(&wallet, last_save_time, true).await);
