@@ -140,7 +140,7 @@ struct StoreItem {
     // sigma_q: String,
     // sigma_tp: String,
     // sigma_w: String,
-    // spec: String,
+    spec: String,
     // spec_B: String,
     // spec_T: String,
     // spkid: f64,
@@ -171,6 +171,9 @@ struct DebrisItem {
 struct GetStoreItemData {
     image_url: String,
     store_value_in_dust: String,
+    profit: String,
+    price: String,
+    asteroid_specification: String,
 }
 
 #[derive(SerdeSerialize, Deserialize, Debug)]
@@ -209,9 +212,10 @@ enum CMDOpcodes {
 async fn main() {
     // connect to MongoDB
     let mongodb_connection_string = env::var("MONGODB_CONNECTION_STRING")
-        .unwrap_or("mongodb://admin:admin@localhost/".to_string());
+        .unwrap_or_else(|_| "mongodb://admin:admin@localhost/".to_string());
 
-    let mongodb_database_name = env::var("MONGO_DATABASE_NAME").unwrap_or("asterank".to_string());
+    let mongodb_database_name =
+        env::var("MONGO_DATABASE_NAME").unwrap_or_else(|_| "asterank".to_string());
 
     let mut client_options = match ClientOptions::parse(&mongodb_connection_string) {
         Ok(c) => c,
@@ -243,7 +247,7 @@ async fn main() {
     };
 
     let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
-        .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
+        .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
 
     if database
         .list_collection_names(doc! {"name": &store_collection_name})
@@ -357,7 +361,7 @@ async fn main() {
 
     let store_collection = database.collection::<StoreItem>(
         &env::var("MONGODB_STORE_COLLECTION_NAME")
-            .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string()),
+            .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string()),
     );
 
     let bought_items: Vec<StoreItem> = store_collection
@@ -451,7 +455,7 @@ async fn main() {
     // GO! GO! GO!
     println!("Starting server");
     let port = env::var("API_PORT")
-        .unwrap_or(8000.to_string())
+        .unwrap_or_else(|_| 8000.to_string())
         .parse::<u16>()
         .unwrap();
     warp::serve(ws_route).run(([0, 0, 0, 0], port)).await;
@@ -463,7 +467,8 @@ async fn main() {
 fn wallet_dir() -> PathBuf {
     // return path to data on filesystem
     // memoized because we don't need to make the syscalls errytim
-    let path = PathBuf::from(env::var("CELESTIUM_DATA_DIR").unwrap_or("/data".to_string()));
+    let path =
+        PathBuf::from(env::var("CELESTIUM_DATA_DIR").unwrap_or_else(|_| "/data".to_string()));
     assert!(path.exists(), "Celestium data path doesn't exist!");
     assert!(path.is_dir(), "Celestium data path is not a directory!");
     path
@@ -908,10 +913,10 @@ async fn parse_buy_store_item(
     };
 
     let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
-        .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
+        .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
     let store_collection = database.collection::<StoreItem>(&store_collection_name);
     let debris_collection_name: String = env::var("MONGODB_DEBRIS_COLLECTION_NAME")
-        .unwrap_or(DEFAULT_MONGODB_DEBRIS_COLLECTION_NAME.to_string());
+        .unwrap_or_else(|_| DEFAULT_MONGODB_DEBRIS_COLLECTION_NAME.to_string());
     let debris_collection = database.collection::<DebrisItem>(&debris_collection_name);
 
     let item = match store_collection.find_one(doc! {"full_name": item_name.to_string()}, None) {
@@ -1153,6 +1158,31 @@ async fn parse_buy_store_item(
     }
 }
 
+fn number_to_short_scale(num: f64) -> String {
+    match num {
+        x if (0.0..1000.0).contains(&x) => format!("{:.02}", x),
+        x if (1_000.0..1_000_000.0).contains(&x) => format!("{:.02} thousands", x / 1000.0),
+        x if (1_000_000.0..1_000_000_000.0).contains(&x) => {
+            format!("{:.02} billion", x / 1_000_000.0)
+        }
+        x if (1_000_000_000.0..1_000_000_000_000.0).contains(&x) => {
+            format!("{:.02} trillion", x / 1_000_000_000.0)
+        }
+        x if (1_000_000_000_000.0..1_000_000_000_000_000.0).contains(&x) => {
+            format!("{:.02} quadrillion", x / 1_000_000_000_000.0)
+        }
+        x if (1_000_000_000_000_000.0..1_000_000_000_000_000_000.0).contains(&x) => {
+            format!("{:.02} quintillion", x / 1_000_000_000_000_000.0)
+        }
+        x if (1_000_000_000_000_000_000.0..1_000_000_000_000_000_000_000.0).contains(&x) => {
+            format!("{:.02} sextillion", x / 1_000_000_000_000_000_000.0)
+        }
+        x => {
+            format!("{:.02} septillion", x / 1_000_000_000_000_000_000_000.0)
+        }
+    }
+}
+
 async fn parse_get_store_item(
     bin_parameters: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
@@ -1173,7 +1203,7 @@ async fn parse_get_store_item(
     };
 
     let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
-        .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
+        .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
     let store_collection = database.collection::<StoreItem>(&store_collection_name);
     let item = match store_collection.find_one(doc! {"full_name": item_name.to_string()}, None) {
         Ok(Some(c)) => c,
@@ -1190,9 +1220,20 @@ async fn parse_get_store_item(
             );
         }
     };
+    let profit = match item.profit {
+        Some(d) => number_to_short_scale(d),
+        None => "Unknown".to_string(),
+    };
+    let price = match item.price {
+        Some(d) => number_to_short_scale(d),
+        None => "Unknown".to_string(),
+    };
     let get_store_item_data = GetStoreItemData {
         image_url,
         store_value_in_dust: item.store_value_in_dust,
+        profit,
+        price,
+        asteroid_specification: item.spec,
     };
 
     let json = unwrap_or_ws_error!(sender, serde_json::to_string(&get_store_item_data));
@@ -1238,10 +1279,10 @@ async fn parse_get_user_data(
     );
 
     let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
-        .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
+        .unwrap_or_else(|_| DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
     let store_collection = database.collection::<StoreItem>(&store_collection_name);
     let debris_collection_name: String = env::var("MONGODB_DEBRIS_COLLECTION_NAME")
-        .unwrap_or(DEFAULT_MONGODB_DEBRIS_COLLECTION_NAME.to_string());
+        .unwrap_or_else(|_| DEFAULT_MONGODB_DEBRIS_COLLECTION_NAME.to_string());
     let debris_collection = database.collection::<DebrisItem>(&debris_collection_name);
 
     let owned_ids: Vec<String> = [
@@ -1535,12 +1576,6 @@ async fn parse_mined_transaction(
         Transaction::from_serialized(bin_transaction, &mut i)
     );
 
-    println!(
-        "Got a transaction ({})->({})",
-        transaction.count_inputs(),
-        transaction.count_outputs()
-    );
-
     unwrap_or_ws_error!(
         sender,
         wallet
@@ -1627,10 +1662,11 @@ async fn parse_mined_transaction(
                 println!("Could not send updated pixel: {}", e);
             }
         }
-        println!("Pixel base transaction parsed");
+        println!("Pixel base transaction and Katjing transaction parsed");
     } else {
         add_value_transferral_transaction(&transaction, sender, wallet, database, floating_outputs)
             .await;
+        println!("Arbitrary value transferral transaction parsed")
     }
 
     unwrap_or_ws_error!(sender, save_wallet(&wallet, last_save_time, true).await);
