@@ -82,37 +82,36 @@ def miner(obj) -> Optional[bytes]:
     return None
 
 
-def mine(digest):
+def mine(digest, pool):
     start = 0
     mb = None
     thread_count = cpu_count()
 
-    with Pool(thread_count) as pool:
-        while not mb:
-            end = start + thread_count * DEFAULT_PAR_WORK
-            mb = next(
-                (
-                    m
-                    for m in pool.imap_unordered(
-                        miner,
-                        [
-                            (digest, s, s + DEFAULT_PAR_WORK)
-                            for s in range(
-                                start,
-                                end,
-                                DEFAULT_PAR_WORK,
-                            )
-                        ],
-                    )
-                    if m
-                ),
-                None,
-            )
-            start = end
+    while not mb:
+        end = start + thread_count * DEFAULT_PAR_WORK
+        mb = next(
+            (
+                m
+                for m in pool.imap_unordered(
+                    miner,
+                    [
+                        (digest, s, s + DEFAULT_PAR_WORK)
+                        for s in range(
+                            start,
+                            end,
+                            DEFAULT_PAR_WORK,
+                        )
+                    ],
+                )
+                if m
+            ),
+            None,
+        )
+        start = end
     return mb
 
 
-async def set_pixel(pk, px, py, c, instance_url="wss://api.celestium.space/"):
+async def set_pixel(pk, px, py, c, pool, instance_url="wss://api.celestium.space/"):
     async with websockets.connect(instance_url, ping_interval=None) as ws:
         # get previous pixel hash
         req = (
@@ -177,12 +176,12 @@ async def set_pixel(pk, px, py, c, instance_url="wss://api.celestium.space/"):
 
         # Mine pixel transaction in parallel
         pixel_transaction = pixel_transaction + mine(
-            sha3_256(pixel_transaction).digest()
+            sha3_256(pixel_transaction).digest(), pool
         )
 
         # Mine katjing transaction in parallel
         katjing_transaction = katjing_transaction + mine(
-            sha3_256(katjing_transaction).digest()
+            sha3_256(katjing_transaction).digest(), pool
         )
 
         # send mined transactions back to api

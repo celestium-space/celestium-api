@@ -125,35 +125,36 @@ async def main(image, x, y, sk, shuffle, instance):
         f'Saved our goal image as "{missing_name}" (when corrected for available colors)'
     )
 
-    if pixels:
-        if shuffle:
-            random.shuffle(pixels)
-        for px, py, c in tqdm(pixels, desc=f'Setting pixels for "{image.stem}"'):
-            async with websockets.connect(instance, ping_interval=None) as ws:
-                r = [0xFF]
-                await ws.send(
-                    bytes([Ops.get_pixel_color.value])
-                    + px.to_bytes(2, "big")
-                    + py.to_bytes(2, "big")
-                )
-                while True:
-                    r = await ws.recv()
-                    if r[0] == Ops.pixel_color.value:
-                        break
-                    else:
-                        print(
-                            f"Got unexpected response opcode, got {r[0]} expected {Ops.pixel_color.value}, I'll keep listening"
-                        )
-            cc = r[1]
-            if cc != c:
-                await set_pixel(pk, px, py, c, instance_url=instance)
-            else:
-                print()
-                print(
-                    f"({px}, {py}) set to correct color ({cc}) since initial check, skipping"
-                )
-    else:
-        print(f'All pixels already correct for "{image.stem}"')
+    with Pool(thread_count) as pool:
+        if pixels:
+            if shuffle:
+                random.shuffle(pixels)
+            for px, py, c in tqdm(pixels, desc=f'Setting pixels for "{image.stem}"'):
+                async with websockets.connect(instance, ping_interval=None) as ws:
+                    r = [0xFF]
+                    await ws.send(
+                        bytes([Ops.get_pixel_color.value])
+                        + px.to_bytes(2, "big")
+                        + py.to_bytes(2, "big")
+                    )
+                    while True:
+                        r = await ws.recv()
+                        if r[0] == Ops.pixel_color.value:
+                            break
+                        else:
+                            print(
+                                f"Got unexpected response opcode, got {r[0]} expected {Ops.pixel_color.value}, I'll keep listening"
+                            )
+                cc = r[1]
+                if cc != c:
+                    await set_pixel(pk, px, py, c, pool, instance_url=instance)
+                else:
+                    print()
+                    print(
+                        f"({px}, {py}) set to correct color ({cc}) since initial check, skipping"
+                    )
+        else:
+            print(f'All pixels already correct for "{image.stem}"')
     print("Done!")
 
 
