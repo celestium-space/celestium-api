@@ -1,0 +1,8 @@
+opencv-python
+numpy
+websockets
+tqdm
+ecdsa
+pathlib
+click
+click-pathlib

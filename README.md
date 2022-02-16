@@ -49,16 +49,25 @@ All multi-byte numbers are in big-endian format.
 ## Useage
 We have currently implemented two clients for the API. One is found in the [Celestium Frontend](https://gitlab.com/artificialmind/celestium/celestium-frontend) and the other is a bare bones Python client found in this repository.
 
-### Python 
-The file `celestium.py` in the root of this repository exposes functions and constants meant to help people automate interactions with the Canvas programically. We have limited the scope of these functions to canvas interactions as this is the most entertaining part of the project to automate.
+### Python Client
 
-### load_key_pair
+[python/celestium-cli.py](python/celestium-cli.py) is a command line interface that makes it easy to place images on the canvas. To run:
+```sh
+git clone https://gitlab.com/artificialmind/celestium/celestium-api.git
+cd celestium-api/python
+pip install -r requirements.txt
+python celestium-cli.py --help
+```
+
+[python/celestium.py](python/celestium.py) exposes functions and constants meant to help people automate interactions with the canvas programically. We have limited the scope of these functions to canvas interactions as this is the most entertaining part of the project to automate.
+
+#### load_key_pair
 This function is meant to help people load their Public Key and Secret Key from an exported [`sk.txt`](https://celestium.space/wallet).
 
-### set_pixel
-This function will request the api for the data needed to create the two transactions needed to set a pixel on the canvas, `pixel base transaction` and `katjing transaction`. It will then create and mine both transactions and send the result back to the API, changing the pixel and transferring 1 CEL to the PK given.
+#### set_pixel
+This function will request the api for the data needed to create the two transactions needed to set a pixel on the canvas and recieve 1 CEL, `pixel base transaction` and `katjing transaction`. It will then create and mine both transactions and send the result back to the API, changing the pixel and transferring 1 CEL to the PK given.
 
-### color_map
+#### color_map
 This constant is a simple lookup table from color indicies to the actual RGB color on the canvas.
 
 ### Client useage examples
