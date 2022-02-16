@@ -361,6 +361,9 @@ name = "celestium"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "hex",
+ "indexmap",
+ "indicatif",
  "rand 0.6.5",
  "rayon",
  "secp256k1",
@@ -380,7 +383,6 @@ dependencies = [
  "mongodb",
  "num-derive",
  "num-traits",
- "rand 0.8.4",
  "rayon",
  "reqwest",
  "secp256k1",

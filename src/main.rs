@@ -26,7 +26,6 @@ use mongodb::{
 };
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
-use rand::Rng;
 use rayon::ThreadPoolBuilder;
 use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize as SerdeSerialize};
@@ -169,7 +168,7 @@ struct DebrisItem {
 
 #[derive(SerdeSerialize, Deserialize, Debug)]
 struct GetStoreItemData {
-    image_url: String,
+    full_name: String,
     store_value_in_dust: String,
     profit: String,
     price: String,
@@ -179,7 +178,7 @@ struct GetStoreItemData {
 #[derive(SerdeSerialize, Deserialize, Debug)]
 struct UserData {
     balance: String,
-    owned_store_items: Vec<StoreItem>,
+    owned_store_items: Vec<GetStoreItemData>,
     owned_debris: Vec<DebrisItem>,
 }
 
@@ -1188,13 +1187,6 @@ async fn parse_get_store_item(
     sender: &mpsc::UnboundedSender<Message>,
     database: &Database,
 ) {
-    let mut rng = rand::thread_rng();
-    let img_nr = rng.gen_range(0..3);
-    // let filename = format!("./images/{}.jpg", img_nr);
-    // let mut f = File::open(&filename).expect("no file found");
-    // let metadata = fs::metadata(&filename).expect("unable to read metadata");
-    let image_url = format!("/images/{}.gif", img_nr);
-
     let item_name = match std::str::from_utf8(&bin_parameters) {
         Ok(i) => i,
         Err(e) => {
@@ -1229,7 +1221,7 @@ async fn parse_get_store_item(
         None => "Unknown".to_string(),
     };
     let get_store_item_data = GetStoreItemData {
-        image_url,
+        full_name: item.full_name,
         store_value_in_dust: item.store_value_in_dust,
         profit,
         price,
@@ -1304,6 +1296,19 @@ async fn parse_get_user_data(
             .into_iter()
             .flatten()
             .flatten()
+            .map(|x| GetStoreItemData {
+                full_name: x.full_name,
+                store_value_in_dust: x.store_value_in_dust,
+                profit: match x.profit {
+                    Some(d) => number_to_short_scale(d),
+                    None => "Unknown".to_string(),
+                },
+                price: match x.price {
+                    Some(d) => number_to_short_scale(d),
+                    None => "Unknown".to_string(),
+                },
+                asteroid_specification: x.spec,
+            })
             .collect(),
         owned_debris: debris_collection
             .find(doc! {"id_hash": {"$in": &owned_ids}}, None)
