@@ -1,5 +1,6 @@
 import asyncio
 import random
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 import click
@@ -27,7 +28,7 @@ def find_closest_color(color):
     "-i",
     "--image",
     type=click_pathlib.Path(exists=True, dir_okay=False, resolve_path=True),
-    default=None,
+    required=True,
     help="The image to place on canvas (completely transparrent pixels will be ignored)",
 )
 @click.option(
@@ -125,6 +126,7 @@ async def main(image, x, y, sk, shuffle, instance):
         f'Saved our goal image as "{missing_name}" (when corrected for available colors)'
     )
 
+    thread_count = cpu_count()
     with Pool(thread_count) as pool:
         if pixels:
             if shuffle:
@@ -147,7 +149,9 @@ async def main(image, x, y, sk, shuffle, instance):
                             )
                 cc = r[1]
                 if cc != c:
-                    await set_pixel(pk, px, py, c, pool, instance_url=instance)
+                    await set_pixel(
+                        pk, px, py, c, pool, thread_count, instance_url=instance
+                    )
                 else:
                     print()
                     print(

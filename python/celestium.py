@@ -1,7 +1,6 @@
 import math
 from enum import Enum
 from hashlib import sha3_256
-from multiprocessing import Pool, cpu_count
 from typing import Optional
 
 import ecdsa
@@ -82,10 +81,9 @@ def miner(obj) -> Optional[bytes]:
     return None
 
 
-def mine(digest, pool):
+def mine(digest, pool, thread_count):
     start = 0
     mb = None
-    thread_count = cpu_count()
 
     while not mb:
         end = start + thread_count * DEFAULT_PAR_WORK
@@ -111,7 +109,15 @@ def mine(digest, pool):
     return mb
 
 
-async def set_pixel(pk, px, py, c, pool, instance_url="wss://api.celestium.space/"):
+async def set_pixel(
+    pk,
+    px,
+    py,
+    c,
+    pool,
+    thread_count,
+    instance_url="wss://api.celestium.space/",
+):
     async with websockets.connect(instance_url, ping_interval=None) as ws:
         # get previous pixel hash
         req = (
@@ -176,12 +182,12 @@ async def set_pixel(pk, px, py, c, pool, instance_url="wss://api.celestium.space
 
         # Mine pixel transaction in parallel
         pixel_transaction = pixel_transaction + mine(
-            sha3_256(pixel_transaction).digest(), pool
+            sha3_256(pixel_transaction).digest(), pool, thread_count
         )
 
         # Mine katjing transaction in parallel
         katjing_transaction = katjing_transaction + mine(
-            sha3_256(katjing_transaction).digest(), pool
+            sha3_256(katjing_transaction).digest(), pool, thread_count
         )
 
         # send mined transactions back to api
