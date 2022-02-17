@@ -170,8 +170,8 @@ struct DebrisItem {
 struct GetStoreItemData {
     full_name: String,
     store_value_in_dust: String,
-    profit: String,
-    price: String,
+    profit: f64,
+    price: f64,
     asteroid_specification: String,
 }
 
@@ -1157,31 +1157,6 @@ async fn parse_buy_store_item(
     }
 }
 
-fn number_to_short_scale(num: f64) -> String {
-    match num {
-        x if (0.0..1000.0).contains(&x) => format!("{:.02}", x),
-        x if (1_000.0..1_000_000.0).contains(&x) => format!("{:.02} thousands", x / 1000.0),
-        x if (1_000_000.0..1_000_000_000.0).contains(&x) => {
-            format!("{:.02} billion", x / 1_000_000.0)
-        }
-        x if (1_000_000_000.0..1_000_000_000_000.0).contains(&x) => {
-            format!("{:.02} trillion", x / 1_000_000_000.0)
-        }
-        x if (1_000_000_000_000.0..1_000_000_000_000_000.0).contains(&x) => {
-            format!("{:.02} quadrillion", x / 1_000_000_000_000.0)
-        }
-        x if (1_000_000_000_000_000.0..1_000_000_000_000_000_000.0).contains(&x) => {
-            format!("{:.02} quintillion", x / 1_000_000_000_000_000.0)
-        }
-        x if (1_000_000_000_000_000_000.0..1_000_000_000_000_000_000_000.0).contains(&x) => {
-            format!("{:.02} sextillion", x / 1_000_000_000_000_000_000.0)
-        }
-        x => {
-            format!("{:.02} septillion", x / 1_000_000_000_000_000_000_000.0)
-        }
-    }
-}
-
 async fn parse_get_store_item(
     bin_parameters: &[u8],
     sender: &mpsc::UnboundedSender<Message>,
@@ -1212,19 +1187,12 @@ async fn parse_get_store_item(
             );
         }
     };
-    let profit = match item.profit {
-        Some(d) => number_to_short_scale(d),
-        None => "Unknown".to_string(),
-    };
-    let price = match item.price {
-        Some(d) => number_to_short_scale(d),
-        None => "Unknown".to_string(),
-    };
+
     let get_store_item_data = GetStoreItemData {
         full_name: item.full_name,
         store_value_in_dust: item.store_value_in_dust,
-        profit,
-        price,
+        profit: item.profit.unwrap_or(0.0),
+        price: item.price.unwrap_or(0.0),
         asteroid_specification: item.spec,
     };
 
@@ -1299,14 +1267,8 @@ async fn parse_get_user_data(
             .map(|x| GetStoreItemData {
                 full_name: x.full_name,
                 store_value_in_dust: x.store_value_in_dust,
-                profit: match x.profit {
-                    Some(d) => number_to_short_scale(d),
-                    None => "Unknown".to_string(),
-                },
-                price: match x.price {
-                    Some(d) => number_to_short_scale(d),
-                    None => "Unknown".to_string(),
-                },
+                profit: x.profit.unwrap_or(0.0),
+                price: x.price.unwrap_or(0.0),
                 asteroid_specification: x.spec,
             })
             .collect(),
