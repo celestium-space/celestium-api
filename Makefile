@@ -4,3 +4,5 @@ debug-run:
 	API_PORT=1337 CELESTIUM_DATA_DIR=data cargo run --features mining-ez-mode
 run:
 	API_PORT=1337 CELESTIUM_DATA_DIR=data cargo run --release
+run-freeze:
+	API_PORT=1337 CELESTIUM_DATA_DIR=data cargo run --features freeze-blockchain

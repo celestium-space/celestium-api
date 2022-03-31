@@ -750,53 +750,68 @@ async fn handle_ws_message(
                 println!("WARNING: A connection was closed unexpectedly before being able to send the canvas");
             }
         }
-        Some(CMDOpcodes::MinedTransaction) => {
-            parse_mined_transaction(
-                &binary_message[1..],
-                &sender,
-                wallet,
-                canvas,
-                database,
-                floating_outputs,
-                clients,
-                last_save_time,
-            )
-            .await
-        }
-        Some(CMDOpcodes::GetPixelMiningData) => {
-            parse_get_pixel_mining_data(
-                &binary_message[1..],
-                &sender,
-                wallet,
-                canvas,
-                floating_outputs,
-            )
-            .await
-        }
-        Some(CMDOpcodes::BuyStoreItem) => {
-            parse_buy_store_item(
-                &binary_message[1..],
-                &sender,
-                wallet,
-                database,
-                last_save_time,
-            )
-            .await
-        }
         Some(CMDOpcodes::GetStoreItem) => {
             parse_get_store_item(&binary_message[1..], &sender, database).await
         }
         Some(CMDOpcodes::GetUserData) => {
             parse_get_user_data(&binary_message[1..], &sender, wallet, database).await
         }
-        Some(CMDOpcodes::GetUserMigrationTransaction) => {
-            parse_get_user_migration_transaction(&binary_message[1..], &sender, wallet).await
-        }
         _ => {
-            ws_error!(
-                sender,
-                format!("Unexpeted CMD Opcode {}", binary_message[0])
-            );
+            #[cfg(feature = "freeze-blockchain")]
+            {
+                ws_error!(
+                    sender,
+                    format!("Unexpeted CMD Opcode {}", binary_message[0])
+                );
+            }
+            #[cfg(not(feature = "freeze-blockchain"))]
+            {
+                match FromPrimitive::from_u8(binary_message[0]) {
+                    Some(CMDOpcodes::MinedTransaction) => {
+                        parse_mined_transaction(
+                            &binary_message[1..],
+                            &sender,
+                            wallet,
+                            canvas,
+                            database,
+                            floating_outputs,
+                            clients,
+                            last_save_time,
+                        )
+                        .await
+                    }
+                    Some(CMDOpcodes::GetPixelMiningData) => {
+                        parse_get_pixel_mining_data(
+                            &binary_message[1..],
+                            &sender,
+                            wallet,
+                            canvas,
+                            floating_outputs,
+                        )
+                        .await
+                    }
+                    Some(CMDOpcodes::BuyStoreItem) => {
+                        parse_buy_store_item(
+                            &binary_message[1..],
+                            &sender,
+                            wallet,
+                            database,
+                            last_save_time,
+                        )
+                        .await
+                    }
+                    Some(CMDOpcodes::GetUserMigrationTransaction) => {
+                        parse_get_user_migration_transaction(&binary_message[1..], &sender, wallet)
+                            .await
+                    }
+                    _ => {
+                        ws_error!(
+                            sender,
+                            format!("Unexpeted CMD Opcode {}", binary_message[0])
+                        );
+                    }
+                }
+            }
         }
     }
 }

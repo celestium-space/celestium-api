@@ -34,4 +34,5 @@ path = "./celestium-lib"
 version = "0.1"
 
 [features]
+freeze-blockchain = []
 mining-ez-mode = ["celestium/mining-ez-mode"]
