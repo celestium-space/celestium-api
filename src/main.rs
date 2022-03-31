@@ -761,7 +761,7 @@ async fn handle_ws_message(
             {
                 ws_error!(
                     sender,
-                    format!("Unexpeted CMD Opcode {}", binary_message[0])
+                    format!("Blockchain has been frozen. \"CMD {}\" is not allowed as it edits the blockchain", binary_message[0])
                 );
             }
             #[cfg(not(feature = "freeze-blockchain"))]
