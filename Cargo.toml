@@ -35,4 +35,5 @@ version = "0.1"
 
 [features]
 freeze-blockchain = []
+freeze-canvas = []
 mining-ez-mode = ["celestium/mining-ez-mode"]

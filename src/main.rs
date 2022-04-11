@@ -283,16 +283,30 @@ async fn main() {
     // initialize empty canvas
     println!("Initializing canvas...");
     let mut canvas = canvas::Canvas::new_test();
-    let off_chain_transactions = wallet.off_chain_transactions.clone();
+    let mut all_transactions = wallet.off_chain_transactions.clone();
+    let off_chain_transactions_len = all_transactions.len();
+    println!(
+        "Loading {} off chain transactions",
+        off_chain_transactions_len
+    );
+
+    for (_, t) in wallet.on_chain_transactions.clone() {
+        all_transactions.extend(t);
+    }
+
+    println!(
+        "Loading {} on chain transactions",
+        all_transactions.len() - off_chain_transactions_len
+    );
 
     let pb = ProgressBar::with_message(
-        ProgressBar::new(off_chain_transactions.len() as u64),
+        ProgressBar::new(all_transactions.len() as u64),
         "Loading candidates from off chain transactions",
     );
     pb.set_style(ProgressStyle::default_bar().template(DEFAULT_PROGRESSBAR_TEMPLATE));
     let mut candidates: HashMap<(u16, u16), HashMap<[u8; PIXEL_HASH_SIZE], (u16, u16, Pixel)>> =
         HashMap::new();
-    for (_, transaction) in &off_chain_transactions {
+    for (_, transaction) in &all_transactions {
         pb.inc(1);
         if let Ok(base_message) = transaction.get_base_transaction_message() {
             if let Ok((x, y, pixel)) = canvas::Canvas::parse_pixel(base_message) {
@@ -1567,84 +1581,95 @@ async fn parse_mined_transaction(
     );
 
     if let Ok(base_transaction_message) = transaction.get_base_transaction_message() {
-        if i >= bin_transaction.len() {
-            ws_error!(
-                sender,
-                "Pixel transaction cannot be parsed without a Katjing transaction".to_string()
-            );
-        }
-
-        let value_transferral_transaction = *unwrap_or_ws_error!(
-            sender,
-            Transaction::from_serialized(bin_transaction, &mut i)
-        );
-
-        unwrap_or_ws_error!(
-            sender,
-            wallet
-                .read()
-                .await
-                .verify_off_chain_transaction(&value_transferral_transaction)
-        );
-
-        let (x, y, pixel) = unwrap_or_ws_error!(
-            sender,
-            canvas::Canvas::parse_pixel(base_transaction_message)
-        );
-
-        let current_pixel_hash = unwrap_or_ws_error!(sender, canvas.read().await.get_pixel(x, y))
-            .hash(x as u16, y as u16)
-            .to_vec();
-        let new_pixel_back_ref_hash = base_transaction_message[..PIXEL_HASH_SIZE].to_vec();
-        if current_pixel_hash != new_pixel_back_ref_hash {
-            ws_error!(
-                sender,
-                format!(
-                    "Got wrong pixel back hash, expected {:x?} got {:x?}",
-                    current_pixel_hash, new_pixel_back_ref_hash,
-                )
-            );
-        }
-
-        let pixel_transaction_id = unwrap_or_ws_error!(sender, transaction.get_id());
-        let mut expected_pixel_hash = [0u8; HASH_SIZE];
-        expected_pixel_hash.copy_from_slice(&Sha3_256::digest(&base_transaction_message));
-        if pixel_transaction_id != expected_pixel_hash {
-            ws_error!(
-                sender,
-                format!(
-                    "Got wrong pixel transaction id, expected {} got {}",
-                    hex::encode(expected_pixel_hash),
-                    hex::encode(pixel_transaction_id)
-                )
-            );
-        }
-
-        unwrap_or_ws_error!(sender, canvas.write().await.set_pixel(x, y, pixel));
-
-        unwrap_or_ws_error!(
-            sender,
-            wallet.write().await.add_off_chain_transaction(&transaction)
-        );
-        add_value_transferral_transaction(
-            &value_transferral_transaction,
-            sender,
-            wallet,
-            database,
-            floating_outputs,
-        )
-        .await;
-
-        let mut update_pixel_binary_message = [0u8; 6];
-        update_pixel_binary_message[0] = CMDOpcodes::UpdatedPixelEvent as u8;
-        update_pixel_binary_message[1..]
-            .copy_from_slice(&base_transaction_message[PIXEL_HASH_SIZE..]);
-        for tx in clients.read().await.values() {
-            if let Err(e) = tx.send(Message::binary(update_pixel_binary_message)) {
-                println!("Could not send updated pixel: {}", e);
+        #[cfg(not(feature = "freeze-canvas"))]
+        {
+            if i >= bin_transaction.len() {
+                ws_error!(
+                    sender,
+                    "Pixel transaction cannot be parsed without a Katjing transaction".to_string()
+                );
             }
+
+            let value_transferral_transaction = *unwrap_or_ws_error!(
+                sender,
+                Transaction::from_serialized(bin_transaction, &mut i)
+            );
+
+            unwrap_or_ws_error!(
+                sender,
+                wallet
+                    .read()
+                    .await
+                    .verify_off_chain_transaction(&value_transferral_transaction)
+            );
+
+            let (x, y, pixel) = unwrap_or_ws_error!(
+                sender,
+                canvas::Canvas::parse_pixel(base_transaction_message)
+            );
+
+            let current_pixel_hash =
+                unwrap_or_ws_error!(sender, canvas.read().await.get_pixel(x, y))
+                    .hash(x as u16, y as u16)
+                    .to_vec();
+            let new_pixel_back_ref_hash = base_transaction_message[..PIXEL_HASH_SIZE].to_vec();
+            if current_pixel_hash != new_pixel_back_ref_hash {
+                ws_error!(
+                    sender,
+                    format!(
+                        "Got wrong pixel back hash, expected {:x?} got {:x?}",
+                        current_pixel_hash, new_pixel_back_ref_hash,
+                    )
+                );
+            }
+
+            let pixel_transaction_id = unwrap_or_ws_error!(sender, transaction.get_id());
+            let mut expected_pixel_hash = [0u8; HASH_SIZE];
+            expected_pixel_hash.copy_from_slice(&Sha3_256::digest(&base_transaction_message));
+            if pixel_transaction_id != expected_pixel_hash {
+                ws_error!(
+                    sender,
+                    format!(
+                        "Got wrong pixel transaction id, expected {} got {}",
+                        hex::encode(expected_pixel_hash),
+                        hex::encode(pixel_transaction_id)
+                    )
+                );
+            }
+
+            unwrap_or_ws_error!(sender, canvas.write().await.set_pixel(x, y, pixel));
+
+            unwrap_or_ws_error!(
+                sender,
+                wallet.write().await.add_off_chain_transaction(&transaction)
+            );
+            add_value_transferral_transaction(
+                &value_transferral_transaction,
+                sender,
+                wallet,
+                database,
+                floating_outputs,
+            )
+            .await;
+
+            let mut update_pixel_binary_message = [0u8; 6];
+            update_pixel_binary_message[0] = CMDOpcodes::UpdatedPixelEvent as u8;
+            update_pixel_binary_message[1..]
+                .copy_from_slice(&base_transaction_message[PIXEL_HASH_SIZE..]);
+            for tx in clients.read().await.values() {
+                if let Err(e) = tx.send(Message::binary(update_pixel_binary_message)) {
+                    println!("Could not send updated pixel: {}", e);
+                }
+            }
+            println!("Pixel base transaction and Katjing transaction parsed");
         }
-        println!("Pixel base transaction and Katjing transaction parsed");
+        #[cfg(feature = "freeze-canvas")]
+        {
+            ws_error!(
+                sender,
+                "Canvas frozen so pixel transactions are not allowed".to_string()
+            );
+        }
     } else {
         add_value_transferral_transaction(&transaction, sender, wallet, database, floating_outputs)
             .await;
