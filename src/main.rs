@@ -301,7 +301,7 @@ async fn main() {
 
     let pb = ProgressBar::with_message(
         ProgressBar::new(all_transactions.len() as u64),
-        "Loading candidates from off chain transactions",
+        "Loading candidates from transactions",
     );
     pb.set_style(ProgressStyle::default_bar().template(DEFAULT_PROGRESSBAR_TEMPLATE));
     let mut candidates: HashMap<(u16, u16), HashMap<[u8; PIXEL_HASH_SIZE], (u16, u16, Pixel)>> =
@@ -837,58 +837,56 @@ async fn get_or_create_nft(
     last_save_time: &SharedLastSavedTime,
     verbose: bool,
 ) -> Result<(PublicKey, BlockHash, TransactionHash, TransactionVarUint), String> {
-    let nft = wallet.read().await.lookup_nft(id_hash);
-    let head_hash = wallet.read().await.get_head_hash();
-    let our_pk = wallet.read().await.get_pk().unwrap();
-    let str_message = std::str::from_utf8(
-        &padded_message[..padded_message.iter().position(|arr| arr == &0u8).unwrap()],
-    )
-    .unwrap();
-    match nft {
-        Some(n) => Ok(n),
-        None => {
-            if verbose {
-                println!(
+    if let Some(nft) = wallet.read().await.lookup_nft(id_hash) {
+        Ok(nft)
+    } else {
+        let head_hash = wallet.read().await.get_head_hash();
+        let our_pk = wallet.read().await.get_pk().unwrap();
+        let str_message = std::str::from_utf8(
+            &padded_message[..padded_message.iter().position(|arr| arr == &0u8).unwrap()],
+        )
+        .unwrap();
+        if verbose {
+            println!(
                 "Trying to buy \"{}\", which does not yet exist among the known already mined IDs, creating it",
                 str_message,
             );
-            }
-            let t = Transaction::new_id_base_transaction(
-                head_hash,
-                padded_message,
-                TransactionOutput::new(TransactionValue::new_id_transfer(id_hash)?, our_pk),
-            )?;
-            // We have to drop the wallet lock while mining,
-            // so other clients can still use the server
-
-            if verbose {
-                println!("Starting mining NFT for \"{}\"...", str_message);
-            }
-            let start = Instant::now();
-            let t = Wallet::mine_transaction(
-                DEFAULT_N_THREADS,
-                DEFAULT_PAR_WORK,
-                t,
-                &ThreadPoolBuilder::new()
-                    .num_threads(DEFAULT_N_THREADS as usize)
-                    .build()
-                    .unwrap(),
-            )?;
-            if verbose {
-                println!(
-                    "Mining of NFT {} done, took {:?}",
-                    str_message,
-                    start.elapsed()
-                );
-            }
-
-            // Mining done and we can retake the wallet lock
-            wallet.write().await.add_off_chain_transaction(&t)?;
-
-            let n = wallet.read().await.lookup_nft(id_hash).unwrap();
-            save_wallet(&wallet, &last_save_time, verbose).await?;
-            Ok(n)
         }
+        let t = Transaction::new_id_base_transaction(
+            head_hash,
+            padded_message,
+            TransactionOutput::new(TransactionValue::new_id_transfer(id_hash)?, our_pk),
+        )?;
+        // We have to drop the wallet lock while mining,
+        // so other clients can still use the server
+
+        if verbose {
+            println!("Starting mining NFT for \"{}\"...", str_message);
+        }
+        let start = Instant::now();
+        let t = Wallet::mine_transaction(
+            DEFAULT_N_THREADS,
+            DEFAULT_PAR_WORK,
+            t,
+            &ThreadPoolBuilder::new()
+                .num_threads(DEFAULT_N_THREADS as usize)
+                .build()
+                .unwrap(),
+        )?;
+        if verbose {
+            println!(
+                "Mining of NFT {} done, took {:?}",
+                str_message,
+                start.elapsed()
+            );
+        }
+
+        // Mining done and we can retake the wallet lock
+        wallet.write().await.add_off_chain_transaction(&t)?;
+
+        let n = wallet.read().await.lookup_nft(id_hash).unwrap();
+        save_wallet(&wallet, &last_save_time, verbose).await?;
+        Ok(n)
     }
 }
 
