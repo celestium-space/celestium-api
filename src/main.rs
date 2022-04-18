@@ -837,7 +837,8 @@ async fn get_or_create_nft(
     last_save_time: &SharedLastSavedTime,
     verbose: bool,
 ) -> Result<(PublicKey, BlockHash, TransactionHash, TransactionVarUint), String> {
-    if let Some(nft) = wallet.read().await.lookup_nft(id_hash) {
+    let looked_up_nft = wallet.read().await.lookup_nft(id_hash);
+    if let Some(nft) = looked_up_nft {
         Ok(nft)
     } else {
         let head_hash = wallet.read().await.get_head_hash();
